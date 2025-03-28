@@ -1,0 +1,1124 @@
+#! /usr/bin/perl
+use strict;
+use warnings;
+
+use FindBin;
+use lib $FindBin::Bin . '/../lib';
+my $datadir = $FindBin::Bin . '/../data';
+
+=head1 NAME
+
+arfmunge - randomize an ARF
+
+=head1 SYNOPSIS
+
+arfmunge [options] origfile newfile
+
+=head1 DESCRIPTION
+
+Randomize an ARF according to estimates of Chandra subsystem
+calibration uncertainties.
+
+=head1 OPTIONS
+
+=over 4
+
+=item --help
+
+Show help and exit.
+
+=item --version
+
+Show version and exit.
+
+=item --specfile=s
+
+The default is F<$FindBin::Bin . '/../data/arfmunge.spec'>
+
+=item --extname=s
+
+The default is C<specresp>.
+
+=back
+
+=head1 AUTHOR
+
+Pete Ratzlaff E<lt>pratzlaff@cfa.harvard.eduE<gt> March 2010
+
+=head1 SEE ALSO
+
+perl(1).
+
+=cut
+
+my $version = '1.0';
+
+use Astro::FITS::CFITSIO;
+use Carp;
+use Getopt::Long;
+use Data::Dumper;
+use File::Copy;
+use Log::Any::App '$log', -file => 0;
+use MyRDB;
+use PDL;
+use PDL::GSL::INTERP;
+use PDL::GSL::RNG;
+use PDL::IO::FlexRaw;
+
+use MCCal::FITS qw( check_status read_bintbl_cols );
+
+$PDL::IO::FlexRaw::writeflexhdr = 1;
+
+# construct HISTORY entry we'll be adding to output file
+my @argv_copy = @ARGV;
+#s/\\/\\\\/g for @argv_copy;
+s/'/\\'/g for @argv_copy;
+my $history_entry = "$0 ". join(' ', map( { "'$_'" } @argv_copy));
+
+my %default_opts = (
+		    specfile => $datadir . '/arfmunge.spec',
+		    extname => 'specresp',
+
+		    # choose a random HRMA contamination layer model
+		    hrmacontamrand => 1,
+		    hrmarandomfile => $datadir . '/hrma/hrma_areas_pm6aa.dat',
+
+		    # perturb HRMA entry in spec file
+		    hrmarand => 1,
+
+		    # default HRMA EA
+		    hrmafile => $datadir . '/hrma/hrmaD1996-12-20axeffaN0007.fits',
+
+		    # yet another HRMA correction
+		    aefforbitcorr => 1,
+		    aefforbitdir => $datadir . '/hrma/aeff-orbit-200809',
+
+		    # perturb GRATING entry in spec file
+		    gratingrand => 1,
+
+		    # perturb filter entry (eg OBFS/UVIS) in spec file
+		    filterrand => 1,
+
+		    # OBF transmission models for ACIS-I and ACIS-S
+		    acisiobf => $datadir . '/acis/acis_i_xray_trans_1198.bin',
+		    acissobf => $datadir . '/acis/acis_s_xray_trans_1198.bin',
+
+		    # choose random acis qe model
+		    acisqerand => 1,
+
+		    # the default qe
+		    acisqe => $datadir . '/acis/s3_d46.qdp.bin',
+		    # alternates based on model fudging
+		    acisrandomrdb => $datadir . '/acis/bi_qe_curves.rdb',
+
+		    # perturb detector entry (eg ACISS3) in spec file
+		    detrand => 1,
+
+		    # perturb contamination model, if contammodel is
+		    # set we use that, otherwise we use the CONTAM entry
+		    # in the spec file
+		    contamrand => 1,
+
+		    # perturb the obf contamination layer model
+		    contammodel => 1,
+
+		    # the model of component optical depths
+		    contamtau => $datadir . '/acis/transmissions.txt',
+
+		    # time-dependent factors
+		    contamtdep => $datadir . '/acis/transmissions_tdep.txt',
+
+		    vertexoffset => 'linear',
+		    edgeveto => 1,
+		    perturb => 'cspline',
+		    spoints => 4, # number of points in cubic spline
+		    clip => 1,
+		    plog => 0, # perturb log of energy
+
+		    nuabs => 1, # for NuSTAR, perturb nuabs function
+		    vignet => 1, # for NuSTAR, perturb vignet function
+		    );
+
+my %opts = %default_opts;
+GetOptions(\%opts,
+	   '--debug!', '--trace!', '--verbose!', '--quiet!', '--log_level!',
+	   'help!', 'version!',
+	   'speconly!', 'specrows=s',
+	   'specfile=s', 'extname=s', 'edgeveto!', 'hrmacontamrand!',
+	   'contamrand!', 'hrmarand!', 'acisqerand!', 'detrand!', 'gratingrand!',
+	   'vertexoffset=s', 'perturb=s', 'spoints=i', 'filterrand!',
+	   'clip!', 'contamtdep=s', 'contamtau=s', 'contammodel!', 'tstart=f',
+	   'plog!', 'aefforbitcorr!', 'aefforbitdir=s',
+	   'flexfile=s', 'seed=i',
+	   'nustar!', 'nuabs!', 'vignet!',
+
+	   # for Athena, where we want --speconly, but a customized contamination model
+	   'pluscontammodel!', 'tausigma=s', 'factortausigma=f',
+
+	   ) or die "Try --help for more information.\n";
+$opts{help} and _help();
+$opts{version} and _version();
+
+@ARGV == 2 or die "Invalid arguments, try --help for more information\n";
+
+my %perturb_functions = (
+			 parabola => \&perturb_parabola,
+			 cspline => \&perturb_cspline,
+			 none => \&perturb_none,
+			 );
+my $perturb_function = $perturb_functions{$opts{perturb}};
+
+# check validity of vertexoffset option
+my %vertex_offsets;
+my @vertex_offsets = qw( linear normal );
+@vertex_offsets{@vertex_offsets} = (1) x @vertex_offsets;
+croak "unrecognized vertex offset = '$_'"
+  unless exists $vertex_offsets{$opts{vertexoffset}};
+
+# set up random number generators
+my $rng = PDL::GSL::RNG->new('default') or croak;
+if (exists $opts{seed}) {
+  $rng->set_seed( $opts{seed} );
+  srand $opts{seed}; # for Perl and PDL random
+}
+else {
+  $rng->set_seed(time ^ ($$ + ($$ << 15)));
+  srand;
+}
+
+my @infiles = split ',', $ARGV[0];
+my @outfiles = split ',', $ARGV[1];
+
+my $ratio;
+
+my $infile = $infiles[0];
+
+my $hdr = Astro::FITS::CFITSIO::fits_read_header($infiles[0].'['.$opts{extname}.']');
+my ($elo, $ehi) = read_bintbl_cols($infiles[0], qw/ energ_lo energ_hi /, { extname => $opts{extname} });
+
+my $e = 0.5 * ($elo + $ehi);
+
+if ($opts{nustar}) {
+  require MCCal::NuSTAR;
+  $ratio = ones($e->nelem);
+  $ratio *= MCCal::NuSTAR::perturb_detabs($rng, $e) if $opts{nuabs};
+  $ratio *= MCCal::NuSTAR::perturb_vignet($rng, $e) if $opts{vignet};
+  goto OUTPUT;
+}
+
+my $tstart = $opts{tstart} ? $opts{tstart}+0. : $hdr->{TSTART};
+
+my %spec = read_specfile($opts{specfile});
+#print Dumper \%spec; exit;
+
+my @speckeys = qw( emin eminvar emax emaxvar maxdiff edgediff );
+
+my $specrows;
+
+# FIXME (??)
+if (!$opts{speconly}) {
+  if ($hdr->{INSTRUME} =~ /ACIS/ or $hdr->{DETNAM} =~ /ACIS-\d*7/) {
+    @{$spec{FILTER}}{qw(e trans)} = read_twocol_bin($opts{acissobf});
+    @{$spec{FILTER}}{@speckeys} = @{$spec{OBFS}}{@speckeys};
+
+    @{$spec{DETECTOR}}{qw(e qe)} = read_twocol_bin($opts{acisqe});
+    @{$spec{DETECTOR}}{@speckeys} = @{$spec{ACISS3}}{@speckeys};
+  }
+  elsif ($hdr->{DETNAM} =~ /HRC-S/) {
+    $opts{clip} = 0;
+    @{$spec{FILTER}}{@speckeys} = @{$spec{UVIS}}{@speckeys};
+    @{$spec{DETECTOR}}{@speckeys} = @{$spec{'HRC-S'}}{@speckeys};
+  }
+  else { croak $hdr->{DETNAM}; }
+
+  # FIXME (??)
+  if ((!exists $hdr->{GRATING}) or ($hdr->{GRATING} =~ /NONE/)) {
+    @{$spec{GRATING}}{@speckeys} = ([])x@speckeys;
+  }
+  elsif ($hdr->{GRATING} =~ /LETG/) {
+    @{$spec{GRATING}}{@speckeys} = @{$spec{LETG}}{@speckeys};
+  }
+  else { croak $hdr->{GRATING}; }
+
+}
+
+# --speconly was specified
+else {
+  if (exists $opts{specrows}) {
+    $specrows = [ map { uc } split(',', $opts{specrows}) ];
+  }
+}
+
+my $flex;
+($ratio, $flex) = arfmunge(\%spec, $e, $opts{speconly}, $specrows,);
+
+writeflex($opts{flexfile}, @$flex) if exists $opts{flexfile};
+
+OUTPUT:
+
+for my $i (0..$#infiles) {
+  apply_ratio( $infiles[$i], $outfiles[$i], $ratio );
+}
+
+exit 0;
+
+sub apply_ratio {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my ($infile, $outfile, $ratio) = @_;
+
+  copy($infile, $outfile) or croak "could not copy '$infile' -> '$outfile': $!\n";
+
+  my $status = 0;
+  my $outfptr = Astro::FITS::CFITSIO::open_file($outfile, Astro::FITS::CFITSIO::READWRITE(), $status);
+  check_status($status) or croak "error opening output file '$outfile'\n";
+
+  # move to specresp hdu
+  $outfptr->movnam_hdu(Astro::FITS::CFITSIO::BINARY_TBL(), $opts{extname}, 0, $status);
+  check_status($status) or croak "could not move to '$opts{extname}' HDU in $outfile\n";
+
+  my %cols = (
+	      specresp => { ctype => Astro::FITS::CFITSIO::TDOUBLE(), ptype => double, },
+	     );
+
+  for (keys %cols) {
+    $cols{$_}{colnum} = undef;
+    $outfptr->get_colnum(Astro::FITS::CFITSIO::CASEINSEN(), $_, $cols{$_}{colnum}, $status);
+    check_status($status) or croak "'$_' column not found in $opts{extname} HDU from $outfile\n";
+  }
+
+  # add a HISTORY keyword
+  $outfptr->write_history($history_entry, $status);
+  check_status($status) or croak "error writing HISTORY entry to $outfile\n";
+
+  my $nrows;
+  $outfptr->get_num_rows($nrows, $status);
+
+  for (keys %cols) {
+    $cols{$_}{piddle} = zeroes($cols{$_}{ptype}, $nrows);
+  }
+
+  $outfptr->perlyunpacking(0);
+
+  for (keys %cols) {
+    $outfptr->read_col($cols{$_}{ctype}, $cols{$_}{colnum}, 1, 1, $nrows, 0, ${$cols{$_}{piddle}->get_dataref}, undef, $status);
+    $cols{$_}{piddle}->upd_data;
+  }
+  check_status($status) or croak "error reading data\n";
+
+  # apply ratio, rewrite specresp column
+  for (qw( specresp )) {
+    (my $tmp = $cols{$_}{piddle}) *= $ratio;
+    $outfptr->write_col($cols{$_}{ctype}, $cols{$_}{colnum}, 1, 1, $nrows, $cols{$_}{piddle}->get_dataref, $status);
+    check_status($status) or croak "error writing data\n";
+  }
+
+  $outfptr->write_chksum($status);
+  check_status($status) or croak "error updating checksum in $outfile\n";
+
+  $outfptr->close_file($status);
+  check_status($status) or croak "error closing $outfile\n";
+}
+
+# returns ratio of perturbed spectral response to actual
+sub arfmunge {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my ($spec, $e, $speconly, $specrows) = @_;
+
+  my $other_corr = ones($e->type, $e->nelem);
+  my $hrma_corr = $other_corr->copy;
+  my $filter_corr = $other_corr->copy;
+  my $detector_corr = $other_corr->copy;
+  my $contam_corr = $other_corr->copy;
+  my $grating_corr = $other_corr->copy;
+
+  # apply HRMA EA contamination varational model correction
+  my $hrmacontamrand_index = -1;
+  if ($opts{hrmacontamrand} && !$speconly) {
+    my ($hrma_e, $hrma_default_ea, $hrma_ea, $index) = hrma_model_random(rand);
+    $_ = my_interpolate($e, $hrma_e, $_) for $hrma_default_ea, $hrma_ea;
+    carp "negative" if which($hrma_default_ea<0)->nelem;
+    $other_corr *= ($hrma_ea / $hrma_default_ea)->badmask(0);
+    $hrmacontamrand_index = $index;
+  }
+
+  my $aefforbitcorr_index = -1;
+  if ($opts{aefforbitcorr} && !$speconly) {
+    my ($perb, $index) = aeff_orbit_corr($e);
+    $other_corr *= $perb;
+    $aefforbitcorr_index = $index;
+  }
+
+  # apply ACIS QE varational model correction
+  # FIXME
+  my $acismodelrandom_index = -1;
+  if (!$speconly
+      && ($hdr->{INSTRUME} =~ /ACIS/ or $hdr->{DETNAM} =~ /ACIS/)
+      && $opts{acisqerand}
+     ) {
+    my ($acis_e, $acis_default_qe, $acis_qe, $index) = acis_model_random(rand);
+    $_ = my_interpolate($e, $acis_e, $_) for $acis_default_qe, $acis_qe;
+    $other_corr *= ($acis_qe / $acis_default_qe)->badmask(0);
+    $acismodelrandom_index = $index;
+  }
+
+  my (@x, @y); # save the perturbation node points
+
+  my $fillcorr = sub {
+    my ($key, $corr) = @_;
+    my $last;
+
+    for my $j (0..$#{$spec->{$key}{emin}}) {
+      my $i = which(
+		    ( $e >= $spec->{$key}{emin}[$j] ) &
+		    ( $e <  $spec->{$key}{emax}[$j] )
+		   );
+      next unless $i->nelem;
+      my ($p, $x, $y) = $perturb_function->($e->index($i),
+					    $spec->{$key}{emin}[$j],
+					    $spec->{$key}{eminvar}[$j],
+					    $spec->{$key}{emax}[$j],
+					    $spec->{$key}{emaxvar}[$j],
+					    $spec->{$key}{maxdiff}[$j],
+					    1);
+      (my $tmp = $corr->index($i)) .= $p;
+      redo if (
+	       $opts{edgeveto} and defined($last) and
+	       abs($corr->at($i->at(0))-$last) > $spec->{$key}{edgediff}[$j-1]
+	      );
+
+      push @x, $x;
+      push @y, $y;
+
+      $last = $corr->at($i->at(-1));
+    }
+  };
+
+  # HRMA ratio
+  $fillcorr->('HRMA', $hrma_corr) if ($opts{hrmarand} && !$speconly);
+
+  # grating ratio
+  $fillcorr->('GRATING', $grating_corr) if ($opts{gratingrand} && !$speconly);
+
+  # filter ratio
+  if ($opts{filterrand} && !$speconly) {
+    $fillcorr->('FILTER', $filter_corr);
+    # do not allow transmission>1
+    if ($opts{clip}) {
+      my $filter_trans = my_interpolate($e, $spec->{FILTER}{e}, $spec->{FILTER}{trans});
+      my $index=which($filter_trans*$filter_corr > 1);
+      (my $tmp = $filter_corr->index($index))
+	.= 1 / $filter_trans->index($index);
+    }
+  }
+
+  # QE ratio
+  if ($opts{detrand} && !$speconly) {
+    $fillcorr->('DETECTOR', $detector_corr);
+    # do not allow QE>1
+    if ($opts{clip}) {
+      my $detector_qe = my_interpolate($e, $spec->{DETECTOR}{e}, $spec->{DETECTOR}{qe});
+      my $index=which($detector_qe*$detector_corr > 1);
+      (my $tmp = $detector_corr->index($index))
+	.= 1 / $detector_qe->index($index);
+    }
+  }
+
+  # CONTAM correction
+  # FIXME
+  if ($opts{pluscontammodel} or ((
+				 (!$speconly && ($hdr->{INSTRUME} =~ /ACIS/) or $hdr->{DETNAM} =~ /ACIS/)
+				 ) && $opts{contamrand})
+     ) {
+    if (!$opts{contammodel}) {
+      $fillcorr->('CONTAM', $contam_corr);
+    } else {
+      my $contam_e;
+      ($contam_e, $contam_corr) = contam_corr($tstart, $perturb_function);
+#print $contam_e,"\n";
+#print $contam_corr,"\n";
+      $contam_corr = my_interpolate($e, $contam_e, $contam_corr);
+#print $e,"\n";
+#print $contam_corr,"\n";
+    }
+  }
+
+  if ($speconly) {
+    $specrows = [ keys %$spec ] unless $specrows;
+    for my $row (@$specrows) {
+      my $tmp_corr = ones($other_corr->nelem);
+      $fillcorr->($row, $tmp_corr);
+      $other_corr *= $tmp_corr;
+    }
+  }
+
+  carp "negative values in hrma_corr" if which($hrma_corr<0)->nelem;
+  carp "negative values in filter_corr" if which($filter_corr<0)->nelem;
+  carp "negative values in detector_corr" if which($detector_corr<0)->nelem;
+  carp "negative values in contam_corr" if which($contam_corr<0)->nelem;
+
+  my $x = cat @x;
+  my $y = cat @y;
+
+  my $aeff_ratio = $other_corr * $hrma_corr * $filter_corr * $detector_corr * $contam_corr;
+
+  my $indices = ones(short, 3) * -1;
+  $indices->set(0, $aefforbitcorr_index);
+  $indices->set(1, $hrmacontamrand_index);
+  $indices->set(2, $acismodelrandom_index);
+
+  croak if $indices->at(0) > 7;
+
+  return $aeff_ratio, [ $x, $y, $indices, $aeff_ratio ];
+}
+
+sub _help {
+  exec('perldoc', '-F', $FindBin::Bin . '/' . $FindBin::RealScript);
+}
+
+sub _version {
+  print $version,"\n";
+  exit 0;
+}
+
+sub read_twocol_bin {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my $file = shift;
+
+  open my $obfh, '<', $file or croak "could not open $file: $!";
+  my $data = zeroes(float, 2, (-s $file)/2/4);
+  my $num = $obfh->read(${$data->get_dataref}, $data->nelem * 4);
+  croak $! unless defined $num;
+  $num == $data->nelem * 4 or croak "didn't get correct amount of data";
+  $data->upd_data;
+  $data->bswap4 unless isbigendian();
+  return $data->slice('(0),'), $data->slice('(1),');
+}
+
+{
+  my ($e, $ea);
+  sub hrma_ea {
+    if (!defined $e) {
+      my ($elo, $ehigh);
+      ($elo, $ehigh, $ea) = read_bintbl_cols($opts{hrmafile}, qw( energ_lo energ_hi effarea ), { extname => 'axaf_axeffa' }) or croak;
+      $e = ($ehigh+$elo)/2;
+      $_ = $_->flat for $e, $ea;
+    }
+    return $e, $ea;
+  }
+}
+
+# FIXME: not returning nodes
+sub perturb_parabola {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my ($e, $emin, $eminvar, $emax, $emaxvar, $n) = @_;
+
+  if ($opts{plog}) {
+    $_ = log($_) for $e, $emin, $emax;
+  }
+
+  my $pert = ones($e->type, $e->nelem);
+#  my $pert = ones($e->type, $e->nelem, $n);
+
+  # simple parabolas for now
+
+  # vertex energy has uniform distribution from (emin, emax)
+  my $vertex = random($n) * ($emax-$emin) + $emin;
+
+  my $dev = $eminvar + ($emaxvar-$eminvar)/($emax-$emin)*($vertex-$emin);
+
+  my $offset;
+  # vertex deviation has uniform distribution from (-dev, dev)
+  for ($opts{vertexoffset}) {
+    $_ eq 'linear' and $offset = random($n) * $dev * 2 - $dev, last;
+    $_ eq 'normal' and $offset = gauss_truncated($n, $dev, float), last;
+    croak "unrecognized vertex offset distribution = '$_'";
+  }
+
+  # calculate coeffs required for maximum perturbation to be attained at
+  # "corners"
+
+  my ($i, $tmp);
+
+  my $coeff_ll = (-$dev - $offset) / ($emin - $vertex)**2;
+  my $coeff_lr = (-$dev - $offset) / ($emax - $vertex)**2;
+  my $coeffs_low = $coeff_lr->copy;
+  $i = which($coeff_ll > $coeff_lr);
+  ($tmp = $coeffs_low->index($i)) .= $coeff_ll->index($i);
+
+  my $coeff_ul = ($dev - $offset) / ($emin - $vertex)**2;
+  my $coeff_ur = ($dev - $offset) / ($emax - $vertex)**2;
+  my $coeffs_high = $coeff_ur->copy;
+  $i = which($coeff_ul < $coeff_ur);
+  ($tmp = $coeffs_high->index($i)) .= $coeff_ul->index($i);
+
+  # now choose coefficients with uniform distribution
+  my $coeffs = random($n) * ($coeffs_high-$coeffs_low) + $coeffs_low;
+
+  $pert +=
+    $offset->dummy(0) +
+      $coeffs->dummy(0) *
+	($e->dummy(-1, $n) - $vertex->dummy(0))**2;
+
+  return $pert;
+}
+
+sub perturb_cspline {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my ($e, $emin, $eminvar, $emax, $emaxvar, $maxdiff, $n) = @_;
+
+  if ($opts{plog}) {
+    $_ = log($_) for $e, $emin, $emax;
+  }
+
+  my $pert = ones($e);
+
+  my $x = sequence($opts{spoints}) / ($opts{spoints}-1);
+  my $dev = $eminvar + $x * ($emaxvar - $eminvar);
+
+  my $y = zeroes($x);
+
+  $y->set(0, gauss_truncated_one($dev->at(0)));
+  for my $i (1..$y->nelem-1) {
+    do {
+      $y->set($i, gauss_truncated_one($dev->at($i)));
+      } while (abs($y->at($i)-$y->at($i-1)) > $maxdiff);
+  }
+
+  $x *= $emax-$emin;
+  $x += $emin;
+
+=begin comment
+
+  my $x = sequence($opts{spoints}) * ($emax-$emin) / ($opts{spoints}-1) + $emin;
+  my $dev = $eminvar + ($emaxvar-$eminvar)/($emax-$emin)*($x-$emin);
+#  for my $i (0..$n-1) {
+
+  my $y = random($opts{spoints}) * 2 * $dev - $dev;
+
+=cut
+
+=begin comment
+
+how feasible is this as a 15 minute implementation:
+restrict the spline control points such that they also have to satisfy eg
+c2=c1+/-(0.5*sigma1)
+c3=c2+/-(0.5*sigma2)
+
+etc, where sigma1 etc are the deviations allowed at control point 1.
+this would restrict the swings from one side to the next.
+am envisaging just an extra if statement.
+
+=cut
+
+=begin comment
+
+  for my $j (1..$y->nelem-1) {
+    my $max = $dev->at($j);
+    my $min = -$dev->at($j);
+    $max =$y->at($j-1)+1.0*$dev->at($j-1) if $max>$y->at($j-1)+1.0*$dev->at($j-1);
+    $min =$y->at($j-1)-1.0*$dev->at($j-1) if $min<$y->at($j-1)-1.0*$dev->at($j-1);
+    (my $tmp = $y->slice("$j:$j")) .= random(1)*($max-$min)+$min;
+  }
+
+=cut
+
+  my $spl = PDL::GSL::INTERP->init('cspline', $x, $y);
+
+  $pert += $spl->eval($e);
+#    (my $tmp = $pert->slice(",($i)")) += $spl->eval($e);
+#  }
+  return $pert, $x, $y;
+}
+
+sub perturb_cspline_old {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my ($e, $emin, $eminvar, $emax, $emaxvar, $n) = @_;
+
+  if ($opts{plog}) {
+    $_ = log($_) for $e, $emin, $emax;
+  }
+
+#  my $pert = ones($e->type, $e->nelem, $n);
+  my $pert = ones($e->type, $e->nelem);
+
+  my $x = sequence($opts{spoints}) * ($emax-$emin) / ($opts{spoints}-1) + $emin;
+  my $dev = $eminvar + ($emaxvar-$eminvar)/($emax-$emin)*($x-$emin);
+#  for my $i (0..$n-1) {
+
+  my $y = random($opts{spoints}) * 2 * $dev - $dev;
+
+=begin comment
+
+how feasible is this as a 15 minute implementation:
+restrict the spline control points such that they also have to satisfy eg
+c2=c1+/-(0.5*sigma1)
+c3=c2+/-(0.5*sigma2)
+
+etc, where sigma1 etc are the deviations allowed at control point 1.
+this would restrict the swings from one side to the next.
+am envisaging just an extra if statement.
+
+=cut
+
+  for my $j (1..$y->nelem-1) {
+    my $max = $dev->at($j);
+    my $min = -$dev->at($j);
+    $max =$y->at($j-1)+1.0*$dev->at($j-1) if $max>$y->at($j-1)+1.0*$dev->at($j-1);
+    $min =$y->at($j-1)-1.0*$dev->at($j-1) if $min<$y->at($j-1)-1.0*$dev->at($j-1);
+    (my $tmp = $y->slice("$j:$j")) .= random(1)*($max-$min)+$min;
+  }
+
+    my $spl = PDL::GSL::INTERP->init('cspline', $x, $y);
+
+  $pert += $spl->eval($e);
+#    (my $tmp = $pert->slice(",($i)")) += $spl->eval($e);
+#  }
+  return $pert;
+}
+
+# FIXME: not returning nodes
+sub perturb_none {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my ($e, $emin, $eminvar, $emax, $emaxvar, $n) = @_;
+  return ones($e->type, $e->nelem);
+#  return ones($e->type, $e->nelem, $n);
+}
+
+sub read_specfile {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my $file = shift;
+  my %spec;
+  open my $spec, '<', $file or croak "could not open '$file': $!";
+  local $_;
+  my ($i, $key);
+  while (<$spec>) {
+    chomp($_);
+    next if /^\s*#/ or /^\s*$/;
+    if (/^[a-z]/i) {
+      $key=$_;
+      $i=0;
+      next;
+    }
+
+    my ($emin, $eminvar, $emax, $emaxvar, $maxdiff, $edgediff) = split ' ', $_;
+    push @{$spec{$key}{emin}}, $emin;
+    push @{$spec{$key}{eminvar}}, $eminvar;
+    push @{$spec{$key}{emax}}, $emax;
+    push @{$spec{$key}{emaxvar}}, $emaxvar;
+    push @{$spec{$key}{maxdiff}}, $maxdiff;
+    push @{$spec{$key}{edgediff}}, $edgediff;
+
+    croak $key unless defined $maxdiff;
+
+    if ( $i and
+	 $spec{$key}{edgediff}[-2] <= ($spec{$key}{emaxvar}[-2]-$spec{$key}{eminvar}[-1])) {
+	 #$spec{$key}{emaxvar}[-2] - $spec{$key}{edgediff}[-2] - $spec{$key}{eminvar}[-1] > -.005+1e-3) {
+      carp("possible issue in spec for $key, emaxvar_$i=$spec{$key}{emaxvar}[-2], edgediff_$i=$spec{$key}{edgediff}[-2], eminvar_@{[$i+1]}=$spec{$key}{eminvar}[-1]\n");
+    }
+    ++$i;
+  }
+  $spec->close;
+  return %spec;
+}
+
+sub read_specfile_old {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my $file = shift;
+  my %spec;
+  open my $spec, '<', $file or croak "could not open '$file': $!";
+  local $_;
+  while (<$spec>) {
+    next if /^\s*#/ or /^\s*$/;
+    my ($key, @vals) = split ' ', $_;
+    exists $spec{$key} and croak "duplicate key='$key' in $file";
+    my $i = 0;
+    for (@vals) {
+      my ($emin, $eminvar, $emax, $emaxvar, $edgediff) = split /,/, $_;
+      push @{$spec{$key}{emin}}, $emin;
+      push @{$spec{$key}{eminvar}}, $eminvar;
+      push @{$spec{$key}{emax}}, $emax;
+      push @{$spec{$key}{emaxvar}}, $emaxvar;
+      push @{$spec{$key}{edgediff}}, $edgediff;
+
+      if ( $i and
+	   $spec{$key}{emaxvar}[-2] - $spec{$key}{edgediff}[-2] - $spec{$key}{eminvar}[-1] > -.005+1e-3) {
+	carp("possible issue in spec for $key, emaxvar_$i=$spec{$key}{emaxvar}[-2], edgediff_$i=$spec{$key}{edgediff}[-2], eminvar_@{[$i+1]}=$spec{$key}{eminvar}[-1]\n");
+      }
+      ++$i;
+    }
+  }
+  $spec->close;
+  return %spec;
+}
+
+# choose a HRMA model from the random selection, return both default and
+# varied models
+#
+# runs only once regardless of the number of invocations
+{
+my ($energy, $ea_default, $ea);
+sub hrma_model_random {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  return ($energy, $ea_default, $ea) if defined $ea;
+
+  my $frac = shift;
+  $frac < 1 and $frac >=0 or croak $frac;
+
+  # FIXME: hardcoded number of energies
+  my $ngrid = 1322;
+
+  -f $opts{hrmarandomfile} or croak "could not find $opts{hrmarandomfile}";
+  my $size = -s $opts{hrmarandomfile} or croak "zero size for $opts{hrmarandomfile}";
+
+  my $niter = $size / (4 * $ngrid) - 1;
+
+  # just double check
+  $size == ($niter+1)*4*$ngrid or croak "$size, $niter, $ngrid";
+
+  open my $fh, '<', $opts{hrmarandomfile} or croak $!;
+
+  # energies first
+  $energy = zeroes(float, $ngrid);
+  $fh->sysread(${ $energy->get_dataref }, $ngrid * 4) == $ngrid * 4 or croak;
+  $energy->upd_data;
+  $energy->bswap4 if isbigendian();
+
+  # seek forward to our chosen EA curve
+  my $index = int($frac * $niter);
+  $fh->sysseek($index * $ngrid * 4, 1);
+
+  # read the EA curve
+  $ea = zeroes(float, $ngrid);
+  $fh->sysread(${ $ea->get_dataref }, $ngrid * 4) == $ngrid * 4 or croak;
+  $fh->close;
+  $ea->upd_data;
+  $ea->bswap4 if isbigendian();
+
+  # get the standard EA, regrid
+  my $energy_default;
+ ($energy_default, $ea_default) = hrma_ea();
+  $ea_default = my_interpolate($energy, $energy_default, $ea_default);
+
+  return $energy, $ea_default, $ea, $index;
+}
+}
+
+# choose an ACIS QE model from the random selection, return both default
+# and varied models
+#
+# runs only once regardless of the number of invocations
+{
+my ($energy, $qe_default, $qe, $index);
+sub acis_model_random {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  return ($energy, $qe_default, $qe, $index) if defined $qe;
+
+  my $frac = shift;
+  $frac < 1 and $frac >=0 or croak $frac;
+
+  my @hdr = MyRDB::rdb_header($opts{acisrandomrdb}) or croak;
+  my %params;
+  for (@hdr) {
+    /#\s*(\w+):\s+(.*)/ and $params{$1} = $2;
+  }
+  for (qw( ngrid niter binfile )) {
+    exists $params{$_} or croak "no '$_' header parameter found in $opts{acisrandomrdb}";
+  }
+  my $binfile = $params{binfile};
+  my $ngrid = $params{ngrid};
+  my $niter = $params{niter};
+
+  # append leading directory path to binfile
+  $binfile = $1.$binfile if $opts{acisrandomrdb} =~ m!(.*/)[^/]!;
+
+  -f $binfile or croak "could not find $binfile";
+  my $size = -s $binfile or croak "zero size for $binfile";
+
+  # consistency check
+  $size == ($niter+1)*4*$ngrid or
+    croak "size=$size, niter=$niter, ngrid=$ngrid, file integrity test failed";
+
+  open my $fh, '<', $binfile or croak "cannot open $binfile: $!";
+
+  # energies first
+  $energy = zeroes(float, $ngrid);
+  $fh->sysread(${ $energy->get_dataref }, $ngrid * 4) == $ngrid * 4 or croak;
+  $energy->upd_data;
+  $energy->bswap4 unless isbigendian();
+
+  # default curve next
+  $qe_default = zeroes(float, $ngrid);
+  $fh->sysread(${ $qe_default->get_dataref }, $ngrid * 4) == $ngrid * 4 or croak;
+  $qe_default->upd_data;
+  $qe_default->bswap4 unless isbigendian();
+
+  # seek forward to our chosen QE curve
+  $index = int($frac * ($niter-1));
+  $fh->sysseek($index * $ngrid * 4, 1);
+
+  # read the EA curve
+  $qe = zeroes(float, $ngrid);
+  $fh->sysread(${ $qe->get_dataref }, $ngrid * 4) == $ngrid * 4 or croak;
+  $qe->upd_data;
+  $qe->bswap4 unless isbigendian();
+
+  return $energy, $qe_default, $qe, $index;
+}
+}
+
+# time is seconds since 1998 (i.e., since mjdref, consistent with
+# chandra event time tags)
+sub contam_corr {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my ($time, $pfunc) = @_;
+
+  # returned uncertainties are fractional
+  my ($e, $taus, $uncer) = taus($time);
+
+  my $sumsub = sub {
+    my $sum = shift()->copy;
+    $sum += $_ for @_;
+    return $sum;
+  };
+
+  my $trans_orig = exp(-$sumsub->(@$taus));
+
+  for (0..$#{$taus}) {
+    my $corr = gauss_truncated(1, $uncer->[$_], $e->type)->at(0);
+    $taus->[$_] *= (1+$corr);
+  }
+
+  my $trans_corr = exp(-$sumsub->(@$taus));
+
+  my $corr_factor = $trans_corr / $trans_orig;
+  return $e, $corr_factor;
+
+=begin comment
+
+  my ($e, $c, $o, $f, $fluff, $cerr, $oerr, $ferr, $flufferr) = taus($time);
+
+  my $emin = $e->at(0) - 1e-3;
+  my $emax = $e->at(-1) + 1e-3;
+
+  # now we create perturbations of each component
+  my $cp = $c * $pfunc->($e, $emin, $cerr, $emax, $cerr, 1);
+  my $op = $o * $pfunc->($e, $emin, $oerr, $emax, $oerr, 1);
+  my $fp = $f * $pfunc->($e, $emin, $ferr, $emax, $ferr, 1);
+  my $fluffp = $fluff * $pfunc->($e, $emin, $flufferr, $emax, $flufferr, 1);
+
+  ($c, $e, $o, $f, $fluff) = tau_tcorr($time, $c, $e, $o, $f, $fluff);
+
+  my $trans_orig = exp(-($c+$o+$f+$fluff));
+  my $trans_corr = exp(-($cp+$op+$fp+$fluffp));
+
+  my $corr_factor = $trans_corr / $trans_orig;
+  return $e, $corr_factor;
+
+=cut
+
+}
+
+{
+  my ($e, @taus, @frac_err);
+  # input time is seconds since 1998 (e.g., chandra event times)
+  # returned uncertainties are fractional
+  sub taus {
+    $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+    my $time = shift;
+
+    # read optical depth table
+    if (!defined $e) {
+      open my $fh, '<', $opts{contamtau} or croak "error opening $opts{contamtau}: $!";
+      local $_;
+      while (<$fh>) {
+	# found line containing fractional uncertainties
+	last if /^\#\s+\d+\.\d+/;
+      }
+
+      # extract uncertainties;
+      s/^#\s+//;
+      @frac_err = split;
+
+      @frac_err = split(',', $opts{tausigma}) if $opts{tausigma};
+      @frac_err = ($frac_err[0])x4 if @frac_err==1;
+
+      if ($opts{factortausigma}) {
+	$_ *= $opts{factortausigma} for @frac_err;
+      }
+
+      # rest of data are optical depths...
+      ($e, @taus) = rcols $fh;
+      $fh->close;
+    }
+
+    return $e, [ tau_tcorr($time, @taus) ], [ @frac_err ];
+  }
+}
+
+{
+  my ($time, @tcorr);
+  # input time is seconds since 1998 (e.g., chandra event times)
+  sub tau_tcorr_factors {
+    $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+    my $t = shift;
+
+    # read in the time-dependent factors file if called for first time
+    if (! defined $time) {
+      ($time, @tcorr) = rcols $opts{contamtdep};
+    }
+
+    # return the factors at the requested time
+    return map { interpol $t, $time, $_ } @tcorr;
+  }
+
+}
+
+sub tau_tcorr {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my ($time, @tau) = @_;
+  my @tcorr = tau_tcorr_factors($time);
+  @tau == @tcorr or croak scalar(@tau) . ' versus ' . scalar(@tcorr);
+  return map { $tau[$_] * $tcorr[$_] } 0..$#tau;
+}
+
+sub gauss_truncated_one {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my $sigma = shift;
+
+  my $s = zeroes(1) + $sigma;
+
+  my $r;
+  do { $r = $rng->ran_gaussian_var($s); }
+    while (which(abs($r)>$sigma)->nelem);
+  return $r->at(0);
+}
+
+
+# outputs a truncated gaussian of length $n
+sub gauss_truncated {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my ($n, $sigma, $type) = @_;
+
+  my $s = zeroes($type, $n) + $sigma;
+  my $rand = pdl($type, []);
+
+  while ($rand->nelem < $n) {
+    my $r = $rng->ran_gaussian_var($s);
+    $rand = append($rand, $r->index(which(abs($r) <= $sigma)));
+  }
+
+  return $rand->slice('0:'.($n-1));
+}
+
+sub my_interpolate {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my ($xi, $xn, $yn) = @_;
+
+  my ($yi, $err) = interpolate($xi, $xn, $yn);
+
+  my ($i, $tmp);
+
+  $i = which($err & ($xi<=$xn->at(0)));
+  ($tmp = $yi->index($i)) .= $yn->at(0);
+
+  $i = which($err & ($xi>=$xn->at(-1)));
+  ($tmp = $yi->index($i)) .= $yn->at(-1);
+
+  return $yi;
+}
+
+sub discrete_draw {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my ($k, $prop, $n) = @_;
+
+  my $ddh = $rng->ran_discrete_preproc($prop);
+  return $k->index($rng->ran_discrete($ddh, $n));
+
+  # used to do it this way, but now we just let GSL take care of things
+  my $p = $prop / $prop->sum;
+  my $cp = $p->cumusumover;
+
+  my $r = $rng->get_uniform($n);
+
+  my $i = sumover($r->dummy(0, $cp->nelem) > $cp->dummy(-1,$r->nelem));
+
+  return $k->index($i);
+}
+
+# Jeremy wants to choose one of the various HRMA models at random,
+# apply correction relative to the "f" model
+sub aeff_orbit_corr {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my $e = shift;
+
+  my %prob = (
+	      'aeff-orbit-200809-01a.fits' =>  1,
+	      'aeff-orbit-200809-01b.fits' =>  1,
+	      'aeff-orbit-200809-01c.fits' =>  1,
+	      'aeff-orbit-200809-01d.fits' =>  1,
+	      'aeff-orbit-200809-01e.fits' =>  1,
+	      'aeff-orbit-200809-01f.fits' =>  2,
+	      'aeff-orbit-200809-01g.fits' =>  1,
+	      'aeff-orbit-200810-01v.fits' =>  0.5,
+	      );
+
+  my @f = ('aeff-orbit-200809-01a.fits',
+	   'aeff-orbit-200809-01b.fits',
+	   'aeff-orbit-200809-01c.fits',
+	   'aeff-orbit-200809-01d.fits',
+	   'aeff-orbit-200809-01e.fits',
+	   'aeff-orbit-200809-01f.fits',
+	   'aeff-orbit-200809-01g.fits',
+	   'aeff-orbit-200810-01v.fits',
+	   );
+
+  my @p = ( 1,
+	    1,
+	    1,
+	    1,
+	    1,
+	    2,
+	    1,
+	    0.5,
+	    );
+  my $findex = discrete_draw(sequence(long,scalar @f), pdl(\@p), 1)->at(0);
+  my $file = $f[$findex];
+  my $ffile = 'aeff-orbit-200809-01f.fits';
+
+#  carp "aeff_orbit_corr() chose $file";
+
+  return(ones($e), $findex) if $file eq $ffile;
+
+  $_ = $opts{aefforbitdir} . '/' . $_ for $file, $ffile;
+  for ($file, $ffile) {
+    -r $_ or croak "maybe --aefforbitdir=s should be used, cannot read $_";
+  }
+
+  my ($elo, $ehi, $ea) = read_bintbl_cols($file, qw( energ_lo energ_hi effarea ), { extname => 'axaf_axeffa'}) or croak "error reading $file";
+  $ea = my_interpolate($e, (0.5*($elo+$ehi))->slice(',(0)'), $ea->slice(',(0)'));
+
+  my ($elof, $ehif, $eaf) = read_bintbl_cols($ffile, qw( energ_lo energ_hi effarea ), { extname => 'axaf_axeffa'}) or croak "error reading $ffile";
+  $eaf = my_interpolate($e, (0.5*($elof+$ehif))->slice(',(0)'), $eaf->slice(',(0)'));
+
+  return $ea / $eaf, $findex;
+}
