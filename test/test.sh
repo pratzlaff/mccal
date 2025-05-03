@@ -14,6 +14,5 @@ mkdir -p $outdir
 for i in $(seq 1 $n)
 do
     outfile=`printf "%s/%s_%03d.garf" $outdir $infile_base $i`
-    $perl ../bin/arfmunge $infile $outfile #--speconly
+    $perl ../bin/arfmod $infile $outfile #--speconly
 done
-
