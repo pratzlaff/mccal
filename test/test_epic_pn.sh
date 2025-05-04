@@ -11,8 +11,8 @@ specfile=../data/xmm.spec
 title='EPIC pn Simulated ARFs'
 opts="--speconly -specrows=mm,contam,opfm,epicpn"
 
-\rm -rf "$outdir"
-\mkdir -p "$outdir"
+rm -rf "$outdir"
+mkdir -p "$outdir"
 
 for i in $(seq 1 $n)
 do
@@ -20,4 +20,4 @@ do
     "$perl" ../bin/arfmod "$specfile" "$infile" "$outfile" $opts
 done
 
-"$perl" plot1d.pl "$infile" "$outdir" --title "$title" --dev "${infile_base}"_simulated_arfs.png/png
+"$perl" plot_arfs.pl "$infile" "$outdir" --title "$title" --dev "${infile_base}"_simulated_arfs.png/png
