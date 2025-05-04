@@ -16,7 +16,7 @@ perl bin/arfmod data/chandra.spec orig.arf mod.arf
 
 A number of simulated ACIS/NONE ARFs are plotted below. The solid black
 line is the "true" response.
-<image src="images/hrcs_letg_simulated_arfs.png" />
+<image src="images/acis_none_simulated_arfs.png" />
 
 And for HRC-S/LETG,
 <image src="images/hrcs_letg_simulated_arfs.png" />
