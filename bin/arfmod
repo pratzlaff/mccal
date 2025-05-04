@@ -221,6 +221,10 @@ if ($opts{nustar}) {
   goto OUTPUT;
 }
 
+if ($hdr->{'TELESCOP'} !~ 'CHANDRA' and not $opts{speconly}) {
+  croak "--speconly required for missons other than Chandra";
+}
+
 my $tstart = $opts{tstart} ? $opts{tstart}+0. : $hdr->{TSTART};
 
 my %spec = read_specfile($specfile);
@@ -230,7 +234,7 @@ my @speckeys = qw( emin eminvar emax emaxvar maxdiff edgediff );
 
 my $specrows;
 
-# FIXME (??)
+# FIXME: make this Chandra-specific
 if (!$opts{speconly}) {
   if ($hdr->{INSTRUME} =~ /ACIS/ or $hdr->{DETNAM} =~ /ACIS-\d*7/) {
     @{$spec{FILTER}}{qw(e trans)} = read_twocol_bin($opts{acissobf});
@@ -322,6 +326,7 @@ sub arfmod {
   my (@x, @y); # save the perturbation node points
 
   my $fillcorr = sub {
+    $log->infof("%s: %s", (caller(0))[3], \@_);
     my ($key, $corr) = @_;
     my $last;
 
@@ -384,7 +389,7 @@ sub arfmod {
   }
 
   # CONTAM correction...
-  # ...XMM arf doesn't have detnam keyword, thus exists() condition
+  # ...XMM arf doesn't have detnam keyword, thus exists()
   if ($opts{pluscontammodel} or ((
 				  (!$speconly && ($hdr->{INSTRUME} =~ /ACIS/) or
 				   (exists $hdr->{DETNAM} and $hdr->{DETNAM} =~ /ACIS/)
