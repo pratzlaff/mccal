@@ -1,4 +1,4 @@
-package NuSTAR;
+package MCCal::NuSTAR;
 use strict;
 use warnings;
 use feature 'state';

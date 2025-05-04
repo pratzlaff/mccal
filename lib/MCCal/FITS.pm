@@ -6,12 +6,14 @@ use warnings;
 
 use Exporter 'import';
 our @EXPORT_OK  = qw(
+		      apply_ratio
 		      check_status
 		      read_bintbl_cols
 		   );
 
 use Astro::FITS::CFITSIO;
 use Carp;
+use File::Copy;
 use Log::Any '$log';
 use PDL;
 
@@ -556,6 +558,64 @@ sub error {
   my $mname = (caller 1)[3];
   defined $mname or $mname = 'main';
   print STDERR "$mname() - $txt\n";
+}
+
+sub apply_ratio {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my ($infile, $outfile, $extname, $ratio, $history) = @_;
+
+  copy($infile, $outfile) or croak "could not copy '$infile' -> '$outfile': $!\n";
+
+  my $status = 0;
+  my $outfptr = Astro::FITS::CFITSIO::open_file($outfile, Astro::FITS::CFITSIO::READWRITE(), $status);
+  check_status($status) or croak "error opening output file '$outfile'\n";
+
+  # move to specresp hdu
+  $outfptr->movnam_hdu(Astro::FITS::CFITSIO::BINARY_TBL(), $extname, 0, $status);
+  check_status($status) or croak "could not move to '$extname' HDU in $outfile\n";
+
+  my %cols = (
+	      specresp => { ctype => Astro::FITS::CFITSIO::TDOUBLE(), ptype => double, },
+	     );
+
+  for (keys %cols) {
+    $cols{$_}{colnum} = undef;
+    $outfptr->get_colnum(Astro::FITS::CFITSIO::CASEINSEN(), $_, $cols{$_}{colnum}, $status);
+    check_status($status) or croak "'$_' column not found in $extname HDU from $outfile\n";
+  }
+
+  # add a HISTORY keyword
+  $outfptr->write_history($history, $status);
+  check_status($status) or croak "error writing HISTORY entry to $outfile\n";
+
+  my $nrows;
+  $outfptr->get_num_rows($nrows, $status);
+
+  for (keys %cols) {
+    $cols{$_}{piddle} = zeroes($cols{$_}{ptype}, $nrows);
+  }
+
+  $outfptr->perlyunpacking(0);
+
+  for (keys %cols) {
+    $outfptr->read_col($cols{$_}{ctype}, $cols{$_}{colnum}, 1, 1, $nrows, 0, ${$cols{$_}{piddle}->get_dataref}, undef, $status);
+    $cols{$_}{piddle}->upd_data;
+  }
+  check_status($status) or croak "error reading data\n";
+
+  # apply ratio, rewrite specresp column
+  for (qw( specresp )) {
+    (my $tmp = $cols{$_}{piddle}) *= $ratio;
+    $outfptr->write_col($cols{$_}{ctype}, $cols{$_}{colnum}, 1, 1, $nrows, $cols{$_}{piddle}->get_dataref, $status);
+    check_status($status) or croak "error writing data\n";
+  }
+
+  $outfptr->write_chksum($status);
+  check_status($status) or croak "error updating checksum in $outfile\n";
+
+  $outfptr->close_file($status);
+  check_status($status) or croak "error closing $outfile\n";
 }
 
 =head1 AUTHOR

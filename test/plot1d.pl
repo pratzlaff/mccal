@@ -77,9 +77,8 @@ $opts{version} and _version();
 my ($arf, $dir) = @ARGV;
 
 my $barename = fileparse($arf, qr/\.[^.]*/);
-print $barename, "\n";
 
-my @arfs = glob("$dir/${barename}_[0-9][0-9][0-9].garf");
+my @arfs = glob("$dir/${barename}_[0-9][0-9][0-9].arf");
 my $n = @arfs;
 $n = $opts{n} if $opts{n} < $n;
 

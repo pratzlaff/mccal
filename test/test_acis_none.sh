@@ -7,12 +7,14 @@ n=30
 infile=acis_none.arf
 infile_base=`basename $infile | sed 's/\..*//' `
 outdir=./out
+specfile=../data/chandra.spec
+opts="" #--speconly"
 
-rm -rf $outdir
-mkdir -p $outdir
+\rm -rf "$outdir"
+\mkdir -p "$outdir"
 
 for i in $(seq 1 $n)
 do
-    outfile=`printf "%s/%s_%03d.garf" $outdir $infile_base $i`
-    $perl ../bin/arfmod $infile $outfile #--speconly
+    outfile=`printf "%s/%s_%03d.arf" $outdir $infile_base $i`
+    "$perl" ../bin/arfmod "$specfile" "$infile" "$outfile" $opts
 done

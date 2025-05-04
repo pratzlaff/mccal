@@ -6,11 +6,20 @@ use warnings;
 
 use Exporter 'import';
 our @EXPORT_OK = qw(
-		     parse_opts
+		     discrete_draw
+		     gauss_truncated
+		     gauss_truncated_one
 		     hipd_interval
 		     modalpoint
+		     _interpolate
+		     parse_opts
+		     perturb_cspline
+		     perturb_none
+		     perturb_parabola
+		     read_specfile
 		  );
 
+use Carp;
 use Log::Any '$log';
 use PDL;
 
@@ -43,6 +52,314 @@ A list of functions that can be exported.  You can delete this section
 if you don't export anything, such as for a purely object-oriented module.
 
 =head1 SUBROUTINES/METHODS
+
+=cut
+
+
+
+# FIXME: not returning nodes
+sub perturb_parabola {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+  my $rng = $::rng;
+
+  my ($e, $emin, $eminvar, $emax, $emaxvar, $n, $opts) = @_;
+  my %opts = %{$opts};
+
+  if ($opts{plog}) {
+    $_ = log($_) for $e, $emin, $emax;
+  }
+
+  my $pert = ones($e->type, $e->nelem);
+#  my $pert = ones($e->type, $e->nelem, $n);
+
+  # simple parabolas for now
+
+  # vertex energy has uniform distribution from (emin, emax)
+  my $vertex = $rng->get_uniform($n) * ($emax-$emin) + $emin;
+
+  my $dev = $eminvar + ($emaxvar-$eminvar)/($emax-$emin)*($vertex-$emin);
+
+  my $offset;
+  # vertex deviation has uniform distribution from (-dev, dev)
+  for ($opts{vertexoffset}) {
+    $_ eq 'uniform' and $offset = $rng->get_uniform($n) * $dev * 2 - $dev, last;
+    $_ eq 'normal' and $offset = gauss_truncated($n, $dev, float), last;
+    croak "unrecognized vertex offset distribution = '$_'";
+  }
+
+  # calculate coeffs required for maximum perturbation to be attained at
+  # "corners"
+
+  my ($i, $tmp);
+
+  my $coeff_ll = (-$dev - $offset) / ($emin - $vertex)**2;
+  my $coeff_lr = (-$dev - $offset) / ($emax - $vertex)**2;
+  my $coeffs_low = $coeff_lr->copy;
+  $i = which($coeff_ll > $coeff_lr);
+  ($tmp = $coeffs_low->index($i)) .= $coeff_ll->index($i);
+
+  my $coeff_ul = ($dev - $offset) / ($emin - $vertex)**2;
+  my $coeff_ur = ($dev - $offset) / ($emax - $vertex)**2;
+  my $coeffs_high = $coeff_ur->copy;
+  $i = which($coeff_ul < $coeff_ur);
+  ($tmp = $coeffs_high->index($i)) .= $coeff_ul->index($i);
+
+  # now choose coefficients with uniform distribution
+  my $coeffs = $rng->get_uniform($n) * ($coeffs_high-$coeffs_low) + $coeffs_low;
+
+  $pert +=
+    $offset->dummy(0) +
+      $coeffs->dummy(0) *
+	($e->dummy(-1, $n) - $vertex->dummy(0))**2;
+
+  return $pert;
+}
+
+sub perturb_cspline {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my ($e, $emin, $eminvar, $emax, $emaxvar, $maxdiff, $n, $opts) = @_;
+  my %opts = %{$opts};
+
+  if ($opts{plog}) {
+    $_ = log($_) for $e, $emin, $emax;
+  }
+
+  my $pert = ones($e);
+
+  my $x = sequence($opts{spoints}) / ($opts{spoints}-1);
+  my $dev = $eminvar + $x * ($emaxvar - $eminvar);
+
+  my $y = zeroes($x);
+
+  $y->set(0, gauss_truncated_one($dev->at(0)));
+  for my $i (1..$y->nelem-1) {
+    do {
+      $y->set($i, gauss_truncated_one($dev->at($i)));
+      } while (abs($y->at($i)-$y->at($i-1)) > $maxdiff);
+  }
+
+  $x *= $emax-$emin;
+  $x += $emin;
+
+=begin comment
+
+  my $x = sequence($opts{spoints}) * ($emax-$emin) / ($opts{spoints}-1) + $emin;
+  my $dev = $eminvar + ($emaxvar-$eminvar)/($emax-$emin)*($x-$emin);
+#  for my $i (0..$n-1) {
+
+  my $y = $rng->get_uniform($opts{spoints}) * 2 * $dev - $dev;
+
+=cut
+
+=begin comment
+
+how feasible is this as a 15 minute implementation:
+restrict the spline control points such that they also have to satisfy eg
+c2=c1+/-(0.5*sigma1)
+c3=c2+/-(0.5*sigma2)
+
+etc, where sigma1 etc are the deviations allowed at control point 1.
+this would restrict the swings from one side to the next.
+am envisaging just an extra if statement.
+
+=cut
+
+=begin comment
+
+  for my $j (1..$y->nelem-1) {
+    my $max = $dev->at($j);
+    my $min = -$dev->at($j);
+    $max =$y->at($j-1)+1.0*$dev->at($j-1) if $max>$y->at($j-1)+1.0*$dev->at($j-1);
+    $min =$y->at($j-1)-1.0*$dev->at($j-1) if $min<$y->at($j-1)-1.0*$dev->at($j-1);
+    (my $tmp = $y->slice("$j:$j")) .= $rng->get_uniform(1)*($max-$min)+$min;
+  }
+
+=cut
+
+  my $spl = PDL::GSL::INTERP->init('cspline', $x, $y);
+
+  $pert += $spl->eval($e);
+#    (my $tmp = $pert->slice(",($i)")) += $spl->eval($e);
+#  }
+  return $pert, $x, $y;
+}
+
+sub perturb_cspline_old {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+  my $rng = $::rng;
+
+  my ($e, $emin, $eminvar, $emax, $emaxvar, $n, $opts) = @_;
+  my %opts = %{$opts};
+
+  if ($opts{plog}) {
+    $_ = log($_) for $e, $emin, $emax;
+  }
+
+#  my $pert = ones($e->type, $e->nelem, $n);
+  my $pert = ones($e->type, $e->nelem);
+
+  my $x = sequence($opts{spoints}) * ($emax-$emin) / ($opts{spoints}-1) + $emin;
+  my $dev = $eminvar + ($emaxvar-$eminvar)/($emax-$emin)*($x-$emin);
+#  for my $i (0..$n-1) {
+
+  my $y = $rng->get_uniform($opts{spoints}) * 2 * $dev - $dev;
+
+=begin comment
+
+how feasible is this as a 15 minute implementation:
+restrict the spline control points such that they also have to satisfy eg
+c2=c1+/-(0.5*sigma1)
+c3=c2+/-(0.5*sigma2)
+
+etc, where sigma1 etc are the deviations allowed at control point 1.
+this would restrict the swings from one side to the next.
+am envisaging just an extra if statement.
+
+=cut
+
+  for my $j (1..$y->nelem-1) {
+    my $max = $dev->at($j);
+    my $min = -$dev->at($j);
+    $max =$y->at($j-1)+1.0*$dev->at($j-1) if $max>$y->at($j-1)+1.0*$dev->at($j-1);
+    $min =$y->at($j-1)-1.0*$dev->at($j-1) if $min<$y->at($j-1)-1.0*$dev->at($j-1);
+    (my $tmp = $y->slice("$j:$j")) .= $rng->get_uniform(1)*($max-$min)+$min;
+  }
+
+    my $spl = PDL::GSL::INTERP->init('cspline', $x, $y);
+
+  $pert += $spl->eval($e);
+#    (my $tmp = $pert->slice(",($i)")) += $spl->eval($e);
+#  }
+  return $pert;
+}
+
+# FIXME: not returning nodes
+sub perturb_none {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my ($e, $emin, $eminvar, $emax, $emaxvar, $n, $opts) = @_;
+  my %opts = %{$opts};
+
+  return ones($e->type, $e->nelem);
+#  return ones($e->type, $e->nelem, $n);
+}
+
+sub read_specfile {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my $file = shift;
+  my %spec;
+  open my $spec, '<', $file or croak "could not open '$file': $!";
+  local $_;
+  my ($i, $key);
+  while (<$spec>) {
+    chomp($_);
+    next if /^\s*#/ or /^\s*$/;
+    if (/^[a-z]/i) {
+      $key=$_;
+      $i=0;
+      next;
+    }
+
+    my ($emin, $eminvar, $emax, $emaxvar, $maxdiff, $edgediff) = split ' ', $_;
+    push @{$spec{$key}{emin}}, $emin;
+    push @{$spec{$key}{eminvar}}, $eminvar;
+    push @{$spec{$key}{emax}}, $emax;
+    push @{$spec{$key}{emaxvar}}, $emaxvar;
+    push @{$spec{$key}{maxdiff}}, $maxdiff;
+    push @{$spec{$key}{edgediff}}, $edgediff;
+
+    croak $key unless defined $maxdiff;
+
+    if ( $i and
+	 $spec{$key}{edgediff}[-2] <= ($spec{$key}{emaxvar}[-2]-$spec{$key}{eminvar}[-1])) {
+	 #$spec{$key}{emaxvar}[-2] - $spec{$key}{edgediff}[-2] - $spec{$key}{eminvar}[-1] > -.005+1e-3) {
+      carp("possible issue in spec for $key, emaxvar_$i=$spec{$key}{emaxvar}[-2], edgediff_$i=$spec{$key}{edgediff}[-2], eminvar_@{[$i+1]}=$spec{$key}{eminvar}[-1]\n");
+    }
+    ++$i;
+  }
+  $spec->close;
+  return %spec;
+}
+
+sub gauss_truncated_one {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+  my $rng = $::rng;
+
+  my $sigma = shift;
+
+  my $s = zeroes(1) + $sigma;
+
+  my $r;
+  do { $r = $rng->ran_gaussian_var($s); }
+    while (which(abs($r)>$sigma)->nelem);
+  return $r->at(0);
+}
+
+# outputs a truncated gaussian of length $n
+sub gauss_truncated {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+  my $rng = $::rng;
+
+  my ($n, $sigma, $type) = @_;
+
+  my $s = zeroes($type, $n) + $sigma;
+  my $rand = pdl($type, []);
+
+  while ($rand->nelem < $n) {
+    my $r = $rng->ran_gaussian_var($s);
+    $rand = append($rand, $r->index(which(abs($r) <= $sigma)));
+  }
+
+  return $rand->slice('0:'.($n-1));
+}
+
+=head2 discrete_draw
+
+=for ref
+
+FIXME
+
+=cut
+
+sub discrete_draw {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+  my $rng = $::rng;
+
+  my ($k, $prop, $n) = @_;
+
+  my $ddh = $rng->ran_discrete_preproc($prop);
+  return $k->index($rng->ran_discrete($ddh, $n));
+
+  # used to do it this way, but now we just let GSL take care of things
+  my $p = $prop / $prop->sum;
+  my $cp = $p->cumusumover;
+
+  my $r = $rng->get_uniform($n);
+
+  my $i = sumover($r->dummy(0, $cp->nelem) > $cp->dummy(-1,$r->nelem));
+
+  return $k->index($i);
+}
+
+sub _interpolate {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my ($xi, $xn, $yn) = @_;
+
+  my ($yi, $err) = interpolate($xi, $xn, $yn);
+
+  my ($i, $tmp);
+
+  $i = which($err & ($xi<=$xn->at(0)));
+  ($tmp = $yi->index($i)) .= $yn->at(0);
+
+  $i = which($err & ($xi>=$xn->at(-1)));
+  ($tmp = $yi->index($i)) .= $yn->at(-1);
+
+  return $yi;
+}
 
 =head2 parse_opts
 
@@ -284,39 +601,12 @@ end
 
 Peter Ratzlaff, C<< <pratzlaff at cfa.harvarf.edu> >>
 
-=head1 BUGS
-
-Please report any bugs or feature requests to C<bug-mccal-misc at rt.cpan.org>, or through
-the web interface at L<https://rt.cpan.org/NoAuth/ReportBug.html?Queue=MCCal-Misc>.  I will be notified, and then you'll
-automatically be notified of progress on your bug as I make changes.
-
-
-
 
 =head1 SUPPORT
 
 You can find documentation for this module with the perldoc command.
 
     perldoc MCCal::Misc
-
-
-You can also look for information at:
-
-=over 4
-
-=item * RT: CPAN's request tracker (report bugs here)
-
-L<https://rt.cpan.org/NoAuth/Bugs.html?Dist=MCCal-Misc>
-
-=item * CPAN Ratings
-
-L<https://cpanratings.perl.org/d/MCCal-Misc>
-
-=item * Search CPAN
-
-L<https://metacpan.org/release/MCCal-Misc>
-
-=back
 
 
 =head1 ACKNOWLEDGEMENTS
