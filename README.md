@@ -25,7 +25,8 @@ Bypassing the Chandra-specific routines, a more general use is possible
 the `--speconly` and `--specrows` options. An example `specfile` for
 XMM is included in the `data` directory, and a run for EPIC pn might be
 ```
-perl bin/arfmod data/xmm.spec epic_pn.arf epic_pn_mod.arf --speconly --specrows=mm,contam,opfm,epicpn
+perl bin/arfmod data/xmm.spec epic_pn.arf epic_pn_mod.arf \
+     --speconly --specrows=mm,contam,opfm,epicpn
 ```
 
 The results of 30 runs for this case:
