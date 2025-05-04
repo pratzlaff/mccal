@@ -8,6 +8,7 @@ infile=hrcs_letg.arf
 infile_base=`basename $infile | sed 's/\..*//' `
 outdir=./out
 specfile=../data/chandra.spec
+title='HRC-S/LETG Simulated ARFs'
 opts="" #--speconly"
 
 \rm -rf "$outdir"
@@ -18,3 +19,5 @@ do
     outfile=`printf "%s/%s_%03d.arf" $outdir $infile_base $i`
     "$perl" ../bin/arfmod "$specfile" "$infile" "$outfile" $opts
 done
+
+"$perl" plot1d.pl "$infile" "$outdir" --title "$title" --dev "${infile_base}"_simulated_arfs.png/png

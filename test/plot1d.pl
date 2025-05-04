@@ -59,12 +59,14 @@ my %default_opts = (
 		    pci => 15, # color index for perturbed curves
 		    allci => 1, # cycle through color indices
 		    ch => 1.5,
+		    title => 'Simulated ARFs',
 		    );
 my %opts = %default_opts;
 GetOptions(\%opts,
 	   'help!', 'version!', 'debug!',
 	   'dev=s', 'n=i', 'lw=f', 'ch=f',
 	   'dlw=f', 'dci=i', 'plw=f', 'pci=i', 'allci!',
+	   'title=s',
 	   ) or die "Try --help for more information.\n";
 if ($opts{debug}) {
   $SIG{__WARN__} = \&Carp::cluck;
@@ -104,7 +106,7 @@ $yhigh*=1.2;
 $_ = log10($_) for $xlow, $xhigh;#, $ylow, $yhigh;
 pgenv($xlow, $xhigh, $ylow, $yhigh, 0, 10);
 
-pglab('energy (keV)', 'effective area (cm\u2\d)', '');
+pglab('energy (keV)', 'effective area (cm\u2\d)', $opts{title});
 
 pgslw($opts{plw});
 
