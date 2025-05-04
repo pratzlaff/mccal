@@ -7,9 +7,11 @@ n=30
 infile=epic_pn.arf
 infile_base=`basename $infile | sed 's/\..*//' `
 outdir=./out
+imagedir=../images
 specfile=../data/xmm.spec
 title='EPIC pn Simulated ARFs'
 opts="--speconly -specrows=mm,contam,opfm,epicpn"
+popts=
 
 rm -rf "$outdir"
 mkdir -p "$outdir"
@@ -20,4 +22,4 @@ do
     "$perl" ../bin/arfmod "$specfile" "$infile" "$outfile" $opts
 done
 
-"$perl" plot_arfs.pl "$infile" "$outdir" --title "$title" --dev "${infile_base}"_simulated_arfs.png/png
+"$perl" plot_arfs.pl "$infile" "$outdir" --title "$title" --dev "$imagedir/${infile_base}"_simulated_arfs.png/png $popts

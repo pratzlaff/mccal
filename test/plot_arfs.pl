@@ -66,7 +66,8 @@ GetOptions(\%opts,
 	   'help!', 'version!', 'debug!',
 	   'dev=s', 'n=i', 'lw=f', 'ch=f',
 	   'dlw=f', 'dci=i', 'plw=f', 'pci=i', 'allci!',
-	   'title=s',
+	   'title=s', 'wav!',
+	   'ylog!', 'ylow=f', 'yhigh=f', 'xlow=f', 'xhigh=f',
 	   ) or die "Try --help for more information.\n";
 if ($opts{debug}) {
   $SIG{__WARN__} = \&Carp::cluck;
@@ -97,16 +98,37 @@ if ($opts{allci}) {
 else { @ci = ($opts{pci}) x $n; }
 
 my ($elo, $ehi, $specresp) = read_bintbl_cols($arf, 'energ_lo', 'energ_hi', 'specresp', { extname => 'specresp' });
+$specresp = $specresp->log10 if $opts{ylog};
 my $e = ($elo+$ehi)/2;
 
-my ($xlow, $xhigh) = $e->minmax;
-my ($ylow, $yhigh) = (0, $specresp->max);
-$yhigh*=1.2;
+my ($x, $xlabel);
 
-$_ = log10($_) for $xlow, $xhigh;#, $ylow, $yhigh;
-pgenv($xlow, $xhigh, $ylow, $yhigh, 0, 10);
+my $axis = 0;
 
-pglab('energy (keV)', 'effective area (cm\u2\d)', $opts{title});
+$axis += 20 if $opts{ylog};
+
+if ($opts{wav}) {
+  $x = (12.398/$e);
+  $xlabel = '\gl';
+}
+else {
+  $x = $e->log10;
+  $axis += 10;
+  $xlabel = 'energy (keV)';
+}
+
+my ($xlow, $xhigh) = $x->minmax;
+my ($ylow, $yhigh) = ($specresp->min, $specresp->max);
+
+$xlow = $opts{xlow} if $opts{xlow};
+$xhigh = $opts{xhigh} if $opts{xhigh};
+
+$ylow = $opts{ylow} if $opts{ylow};
+$yhigh = $opts{yhigh} if $opts{yhigh};
+
+pgenv($xlow, $xhigh, $ylow, $yhigh, 0, $axis);
+
+pglab($xlabel, 'effective area (cm\u2\d)', $opts{title});
 
 pgslw($opts{plw});
 
@@ -114,12 +136,13 @@ for my $i (0..$n-1) {
   my $arf = $arfs[$i];
   pgsci($ci[$i]);
   my ($specresp) = read_bintbl_cols($arf, 'specresp', { extname => 'specresp' });
-  pgline($e->nelem, $e->log10->float->get_dataref, $specresp->float->get_dataref);
+  $specresp = $specresp->log10 if $opts{ylog};
+  pgline($e->nelem, $x->float->get_dataref, $specresp->float->get_dataref);
 }
 
 pgslw($opts{dlw});
 pgsci($opts{dci});
-pgline($e->nelem, $e->log10->float->get_dataref, $specresp->float->get_dataref);
+pgline($e->nelem, $x->float->get_dataref, $specresp->float->get_dataref);
 
 pgclos();
 
@@ -132,4 +155,13 @@ sub _help {
 sub _version {
   print $version,"\n";
   exit 0;
+}
+
+sub fix_specresp {
+  my $y = $_[0]->copy;
+  return $y;
+  my $limit = 0.1 * $y->max;
+  my $i = $y<$limit;
+  $y->where($i) .= $limit;
+  return $y;
 }
