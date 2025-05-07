@@ -3,15 +3,14 @@
 perl=/proj/axaf/bin/perl
 [[ $(hostname) =~ legs|milagro ]] && perl=perl
 
-n=30
-infile=acis_none.arf
+n=5
+infile=simple.arf
 infile_base=`basename $infile | sed 's/\..*//' `
 outdir=./out
-imagedir=../images
-specfile=../data/chandra.spec
-title='ACIS/NONE Simulated ARFs'
-opts=
-popts=
+specfile=../data/simple.spec
+title='Simple Simulated ARFs'
+opts='--speconly --perturb=cspline'
+popts='--ratio'
 
 rm -rf "$outdir"
 mkdir -p "$outdir"
@@ -22,6 +21,4 @@ do
     "$perl" ../bin/arfmod "$specfile" "$infile" "$outfile" $opts
 done
 
-pngdev="$imagedir/${infile_base}"_simulated_arfs.png/png
-
-"$perl" plot_arfs.pl "$infile" "$outdir" --title "$title" --dev "$pngdev"
+"$perl" plot_arfs.pl "$infile" "$outdir" --title "$title" --dev "$imagedir/${infile_base}"_simulated_arfs.png/png $popts
