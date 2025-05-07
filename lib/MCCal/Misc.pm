@@ -17,6 +17,7 @@ our @EXPORT_OK = qw(
 		     perturb_none
 		     perturb_parabola
 		     read_specfile
+		     read_twocol_bin
 		  );
 
 use Carp;
@@ -62,8 +63,9 @@ sub perturb_parabola {
   $log->debugf("%s: %s", (caller(0))[3], \@_);
   my $rng = $::rng;
 
-  my ($e, $emin, $eminvar, $emax, $emaxvar, $n, $opts) = @_;
-  my %opts = %{$opts};
+  # FIXME: haven't updated to enforce $maxdiff
+  my ($e, $emin, $eminvar, $emax, $emaxvar, $maxdiff, $n, $opts) = @_;
+  my %opts = %$opts;
 
   if ($opts{plog}) {
     $_ = log($_) for $e, $emin, $emax;
@@ -112,7 +114,9 @@ sub perturb_parabola {
       $coeffs->dummy(0) *
 	($e->dummy(-1, $n) - $vertex->dummy(0))**2;
 
-  return $pert;
+  my ($x, $y) = ($vertex, $offset);
+  print($x, $y, "\n");
+  return $pert, $x, $y;
 }
 
 sub perturb_cspline {
@@ -238,11 +242,9 @@ am envisaging just an extra if statement.
 sub perturb_none {
   $log->debugf("%s: %s", (caller(0))[3], \@_);
 
-  my ($e, $emin, $eminvar, $emax, $emaxvar, $n, $opts) = @_;
-  my %opts = %{$opts};
+  my ($e, $emin, $eminvar, $emax, $emaxvar, $maxdiff, $n, $opts) = @_;
 
-  return ones($e->type, $e->nelem);
-#  return ones($e->type, $e->nelem, $n);
+  return ones($e->type, $e->nelem), pdl(0), pdl(1);
 }
 
 sub read_specfile {
@@ -519,6 +521,21 @@ sub modalpoint_recurse {
 		    ),
 		    $eps
 		   );
+}
+
+sub read_twocol_bin {
+  $log->debugf("%s: %s", (caller(0))[3], \@_);
+
+  my $file = shift;
+
+  open my $obfh, '<', $file or croak "could not open $file: $!";
+  my $data = zeroes(float, 2, (-s $file)/2/4);
+  my $num = $obfh->read(${$data->get_dataref}, $data->nelem * 4);
+  croak $! unless defined $num;
+  $num == $data->nelem * 4 or croak "didn't get correct amount of data";
+  $data->upd_data;
+  $data->bswap4 unless isbigendian();
+  return $data->slice('(0),'), $data->slice('(1),');
 }
 
 =begin comment
