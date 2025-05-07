@@ -53,7 +53,7 @@ my %default_opts = (
 		    dev => '/xs',
 		    n => 30,
 		    lw => 3,
-		    dlw => 5, # line width for default curve
+		    dlw => 2, # line width for default curve
 		    dci => 1, # color index for default curve
 		    plw => 1, # line width for perturbed curves
 		    pci => 15, # color index for perturbed curves
@@ -66,7 +66,7 @@ GetOptions(\%opts,
 	   'help!', 'version!', 'debug!',
 	   'dev=s', 'n=i', 'lw=f', 'ch=f',
 	   'dlw=f', 'dci=i', 'plw=f', 'pci=i', 'allci!',
-	   'title=s', 'wav!',
+	   'title=s', 'wav!', 'ratio!',
 	   'ylog!', 'ylow=f', 'yhigh=f', 'xlow=f', 'xhigh=f',
 	   ) or die "Try --help for more information.\n";
 if ($opts{debug}) {
@@ -85,11 +85,6 @@ my @arfs = glob("$dir/${barename}_[0-9][0-9][0-9].arf");
 my $n = @arfs;
 $n = $opts{n} if $opts{n} < $n;
 
-pgopen($opts{dev}) > 0 or die;
-
-pgslw($opts{lw});
-pgsch($opts{ch});
-
 my @ci;
 if ($opts{allci}) {
   @ci = (2..15);
@@ -97,28 +92,48 @@ if ($opts{allci}) {
 }
 else { @ci = ($opts{pci}) x $n; }
 
-my ($elo, $ehi, $specresp) = read_bintbl_cols($arf, 'energ_lo', 'energ_hi', 'specresp', { extname => 'specresp' });
-$specresp = $specresp->log10 if $opts{ylog};
+my ($elo, $ehi, $specresp_) = read_bintbl_cols($arf, 'energ_lo', 'energ_hi', 'specresp', { extname => 'specresp' });
 my $e = ($elo+$ehi)/2;
 
-my ($x, $xlabel);
+my $specresp = zeros($e->nelem, $n+1);
 
-my $axis = 0;
+$specresp->slice(',0') .= $specresp_;
 
-$axis += 20 if $opts{ylog};
+for my $i (1..$n) {
+  my ($specresp_) = read_bintbl_cols($arfs[$i-1], 'specresp', { extname => 'specresp' });
+  $specresp->slice(",$i") .= $specresp_;
+}
+
+$specresp = $specresp->log10 if $opts{ylog};
+
+my ($x, $y, $axis, $xlabel, $ylabel) = ($e->log10,
+					$specresp,
+					10,
+					'Energy (keV)',
+					'EA (cm\u2\d)'
+				       );
 
 if ($opts{wav}) {
-  $x = (12.398/$e);
+  $x = 12.398/exp($e);
   $xlabel = '\gl';
+  $axis = 0;
 }
-else {
-  $x = $e->log10;
-  $axis += 10;
-  $xlabel = 'energy (keV)';
+
+if ($opts{ratio}) {
+  $y = $specresp / $specresp->slice(',0');
+  $ylabel = 'Ratio';
+}  
+
+if ($opts{ylog}) {
+  $axis += 20;
+  $y = $y->log10;
 }
 
 my ($xlow, $xhigh) = $x->minmax;
-my ($ylow, $yhigh) = ($specresp->min, $specresp->max);
+my ($ylow, $yhigh) = $y->minmax;
+
+$ylow *= 0.99;
+$yhigh *= 1.01;
 
 $xlow = $opts{xlow} if $opts{xlow};
 $xhigh = $opts{xhigh} if $opts{xhigh};
@@ -126,25 +141,29 @@ $xhigh = $opts{xhigh} if $opts{xhigh};
 $ylow = $opts{ylow} if $opts{ylow};
 $yhigh = $opts{yhigh} if $opts{yhigh};
 
-pgenv($xlow, $xhigh, $ylow, $yhigh, 0, $axis);
+for my $dev (split(',', $opts{dev})) {
+  pgopen($dev) > 0 or die;
 
-pglab($xlabel, 'effective area (cm\u2\d)', $opts{title});
+  pgslw($opts{lw});
+  pgsch($opts{ch});
 
-pgslw($opts{plw});
+  pgenv($xlow, $xhigh, $ylow, $yhigh, 0, $axis);
 
-for my $i (0..$n-1) {
-  my $arf = $arfs[$i];
-  pgsci($ci[$i]);
-  my ($specresp) = read_bintbl_cols($arf, 'specresp', { extname => 'specresp' });
-  $specresp = $specresp->log10 if $opts{ylog};
-  pgline($e->nelem, $x->float->get_dataref, $specresp->float->get_dataref);
+  pglab($xlabel, $ylabel, $opts{title});
+
+  pgslw($opts{plw});
+
+  for my $i (1..$n) {
+    pgsci($ci[$i-1]);
+    pgline($e->nelem, $x->float->get_dataref, $y->slice(",$i")->float->get_dataref);
+  }
+
+  pgslw($opts{dlw});
+  pgsci($opts{dci});
+  pgline($e->nelem, $x->float->get_dataref, $y->slice(',0')->float->get_dataref);
+
+  pgclos();
 }
-
-pgslw($opts{dlw});
-pgsci($opts{dci});
-pgline($e->nelem, $x->float->get_dataref, $specresp->float->get_dataref);
-
-pgclos();
 
 exit 0;
 
