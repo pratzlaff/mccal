@@ -79,13 +79,13 @@ use MCCal::Misc qw( discrete_draw
 		    perturb_none
 		    perturb_parabola
 		    read_specfile
+		    read_twocol_bin
 		 );
 
 $PDL::IO::FlexRaw::writeflexhdr = 1;
 
-# construct HISTORY entry we'll be adding to output file
+# HISTORY entry for output file
 my @argv_copy = @ARGV;
-#s/\\/\\\\/g for @argv_copy;
 s/'/\\'/g for @argv_copy;
 my $history = "$0 ". join(' ', map( { "'$_'" } @argv_copy));
 
@@ -186,16 +186,11 @@ my %perturb_functions = (
 			 cspline => \&perturb_cspline,
 			 none => \&perturb_none,
 			 );
+exists $perturb_functions{$opts{perturb}} or
+  die "unrecognized perturb function '$opts{perturb}'";
 my $perturb_function = $perturb_functions{$opts{perturb}};
 
-# check validity of vertexoffset option
-my %vertex_offsets;
-my @vertex_offsets = qw( uniform normal );
-@vertex_offsets{@vertex_offsets} = (1) x @vertex_offsets;
-croak "unrecognized vertex offset = '$_'"
-  unless exists $vertex_offsets{$opts{vertexoffset}};
-
-# set up random number generator
+# set up rng
 our $rng = PDL::GSL::RNG->new('default') or croak;
 if (exists $opts{seed}) {
   $rng->set_seed( $opts{seed} );
@@ -234,7 +229,6 @@ my @speckeys = qw( emin eminvar emax emaxvar maxdiff edgediff );
 
 my $specrows;
 
-# FIXME: make this Chandra-specific
 if (!$opts{speconly}) {
   if ($hdr->{INSTRUME} =~ /ACIS/ or $hdr->{DETNAM} =~ /ACIS-\d*7/) {
     @{$spec{FILTER}}{qw(e trans)} = read_twocol_bin($opts{acissobf});
@@ -293,36 +287,6 @@ sub arfmod {
   my $contam_corr = $other_corr->copy;
   my $grating_corr = $other_corr->copy;
 
-  # apply HRMA EA contamination varational model correction
-  my $hrmacontamrand_index = -1;
-  if ($opts{hrmacontamrand} && !$speconly) {
-    my ($hrma_e, $hrma_default_ea, $hrma_ea, $index) = hrma_model_random(rand(), \%opts);
-    $_ = _interpolate($e, $hrma_e, $_) for $hrma_default_ea, $hrma_ea;
-    carp "negative" if which($hrma_default_ea<0)->nelem;
-    $other_corr *= ($hrma_ea / $hrma_default_ea)->badmask(0);
-    $hrmacontamrand_index = $index;
-  }
-
-  my $aefforbitcorr_index = -1;
-  if ($opts{aefforbitcorr} && !$speconly) {
-    my ($perb, $index) = aeff_orbit_corr($e, \%opts);
-    $other_corr *= $perb;
-    $aefforbitcorr_index = $index;
-  }
-
-  # apply ACIS QE varational model correction
-  # FIXME
-  my $acismodelrandom_index = -1;
-  if (!$speconly
-      && ($hdr->{INSTRUME} =~ /ACIS/ or $hdr->{DETNAM} =~ /ACIS/)
-      && $opts{acisqerand}
-     ) {
-    my ($acis_e, $acis_default_qe, $acis_qe, $index) = acis_model_random(rand(), \%opts);
-    $_ = _interpolate($e, $acis_e, $_) for $acis_default_qe, $acis_qe;
-    $other_corr *= ($acis_qe / $acis_default_qe)->badmask(0);
-    $acismodelrandom_index = $index;
-  }
-
   my (@x, @y); # save the perturbation node points
 
   my $fillcorr = sub {
@@ -358,58 +322,87 @@ sub arfmod {
     }
   };
 
-  # HRMA ratio
-  $fillcorr->('HRMA', $hrma_corr) if ($opts{hrmarand} && !$speconly);
+  my ( $hrmacontamrand_index,
+       $aefforbitcorr_index,
+       $acismodelrandom_index,
+     ) = (-1)x3;
 
-  # grating ratio
-  $fillcorr->('GRATING', $grating_corr) if ($opts{gratingrand} && !$speconly);
+  if (not $speconly) {
 
-  # filter ratio
-  if ($opts{filterrand} && !$speconly) {
-    $fillcorr->('FILTER', $filter_corr);
-    # do not allow transmission>1
-    if ($opts{clip}) {
-      my $filter_trans = _interpolate($e, $spec->{FILTER}{e}, $spec->{FILTER}{trans});
-      my $index=which($filter_trans*$filter_corr > 1);
-      (my $tmp = $filter_corr->index($index))
-	.= 1 / $filter_trans->index($index);
+    # HRMA EA contamination varational model correction
+    if ($opts{hrmacontamrand}) {
+      my ($hrma_e, $hrma_default_ea, $hrma_ea, $index) = hrma_model_random(rand(), \%opts);
+      $_ = _interpolate($e, $hrma_e, $_) for $hrma_default_ea, $hrma_ea;
+      carp "negative" if which($hrma_default_ea<0)->nelem;
+      $other_corr *= ($hrma_ea / $hrma_default_ea)->badmask(0);
+      $hrmacontamrand_index = $index;
     }
-  }
 
-  # QE ratio
-  if ($opts{detrand} && !$speconly) {
-    $fillcorr->('DETECTOR', $detector_corr);
-    # do not allow QE>1
-    if ($opts{clip}) {
-      my $detector_qe = _interpolate($e, $spec->{DETECTOR}{e}, $spec->{DETECTOR}{qe});
-      my $index=which($detector_qe*$detector_corr > 1);
-      (my $tmp = $detector_corr->index($index))
-	.= 1 / $detector_qe->index($index);
+    if ($opts{aefforbitcorr}) {
+      my ($perb, $index) = aeff_orbit_corr($e, \%opts);
+      $other_corr *= $perb;
+      $aefforbitcorr_index = $index;
     }
-  }
 
-  # CONTAM correction...
-  # ...XMM arf doesn't have detnam keyword, thus exists()
-  if ($opts{pluscontammodel} or ((
-				  (!$speconly && ($hdr->{INSTRUME} =~ /ACIS/) or
+    # ACIS QE varational model correction
+    if (($hdr->{INSTRUME} =~ /ACIS/ or $hdr->{DETNAM} =~ /ACIS/)
+      and $opts{acisqerand}
+       ) {
+      my ($acis_e, $acis_default_qe, $acis_qe, $index) = acis_model_random(rand(), \%opts);
+      $_ = _interpolate($e, $acis_e, $_) for $acis_default_qe, $acis_qe;
+      $other_corr *= ($acis_qe / $acis_default_qe)->badmask(0);
+      $acismodelrandom_index = $index;
+    }
+
+    # HRMA ratio
+    $fillcorr->('HRMA', $hrma_corr) if $opts{hrmarand};
+
+    # grating ratio
+    $fillcorr->('GRATING', $grating_corr) if $opts{gratingrand};
+
+    # filter ratio
+    if ($opts{filterrand}) {
+      $fillcorr->('FILTER', $filter_corr);
+      # do not allow transmission>1
+      if ($opts{clip}) {
+	my $filter_trans = _interpolate($e, $spec->{FILTER}{e}, $spec->{FILTER}{trans});
+	my $index=which($filter_trans*$filter_corr > 1);
+	(my $tmp = $filter_corr->index($index))
+	  .= 1 / $filter_trans->index($index);
+      }
+    }
+
+    # QE ratio
+    if ($opts{detrand}) {
+      $fillcorr->('DETECTOR', $detector_corr);
+      # do not allow QE>1
+      if ($opts{clip}) {
+	my $detector_qe = _interpolate($e, $spec->{DETECTOR}{e}, $spec->{DETECTOR}{qe});
+	my $index=which($detector_qe*$detector_corr > 1);
+	(my $tmp = $detector_corr->index($index))
+	  .= 1 / $detector_qe->index($index);
+      }
+    }
+
+    # CONTAM correction...
+    # ...XMM arf doesn't have detnam keyword, thus exists()
+    if ($opts{pluscontammodel} or ((
+				  ($hdr->{INSTRUME} =~ /ACIS/ or
 				   (exists $hdr->{DETNAM} and $hdr->{DETNAM} =~ /ACIS/)
 				  )
-				 ) && $opts{contamrand})
-     ) {
-    if (!$opts{contammodel}) {
-      $fillcorr->('CONTAM', $contam_corr);
-    } else {
-      my $contam_e;
-      ($contam_e, $contam_corr) = contam_corr($tstart, $perturb_function, \%opts);
-#print $contam_e,"\n";
-#print $contam_corr,"\n";
-      $contam_corr = _interpolate($e, $contam_e, $contam_corr);
-#print $e,"\n";
-#print $contam_corr,"\n";
+				   ) && $opts{contamrand})
+       ) {
+      if (!$opts{contammodel}) {
+	$fillcorr->('CONTAM', $contam_corr);
+      } else {
+	my $contam_e;
+	($contam_e, $contam_corr) = contam_corr($tstart, $perturb_function, \%opts);
+	$contam_corr = _interpolate($e, $contam_e, $contam_corr);
+      }
     }
   }
 
-  if ($speconly) {
+  else {
     $specrows = [ keys %$spec ] unless $specrows;
     for my $row (@$specrows) {
       my $tmp_corr = ones($other_corr->nelem);
@@ -446,19 +439,3 @@ sub _version {
   print $version,"\n";
   exit 0;
 }
-
-sub read_twocol_bin {
-  $log->debugf("%s: %s", (caller(0))[3], \@_);
-
-  my $file = shift;
-
-  open my $obfh, '<', $file or croak "could not open $file: $!";
-  my $data = zeroes(float, 2, (-s $file)/2/4);
-  my $num = $obfh->read(${$data->get_dataref}, $data->nelem * 4);
-  croak $! unless defined $num;
-  $num == $data->nelem * 4 or croak "didn't get correct amount of data";
-  $data->upd_data;
-  $data->bswap4 unless isbigendian();
-  return $data->slice('(0),'), $data->slice('(1),');
-}
-
