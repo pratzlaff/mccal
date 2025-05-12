@@ -164,7 +164,7 @@ sub _process_filename {
 
 =head1 NAME
 
-MyRDB - routines for dealing with RDB files
+MyRDB - routines for reading RDB files
 
 =head1 SYNOPSIS
 
@@ -172,7 +172,7 @@ use MyRDB;
 
 =head1 DESCRIPTION
 
-Routines for playing with RDB files from within Perl.
+Simple routines for reading RDB files.
 
 =head1 ROUTINES
 
@@ -221,15 +221,5 @@ Returns list of column names from the given RDB file.
 Returns list of RDB header lines (newlines still attached).
 
 =back
-
-=head1 BUGS/FEATURES
-
-Need more ideas for routines.
-
-=head1 AUTHOR
-
-Pete Ratzlaff <pratzlaff@cfa.harvard.edu>
-
-Copyright 1997, 1998 Smithsonian Institute
 
 =cut

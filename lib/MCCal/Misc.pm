@@ -26,7 +26,7 @@ use PDL;
 
 =head1 NAME
 
-MCCal::Misc - miscellaneous
+MCCal::Misc
 
 =head1 VERSION
 
@@ -36,26 +36,9 @@ Version 0.01
 
 our $VERSION = '0.01';
 
-=head1 SYNOPSIS
-
-Quick summary of what the module does.
-
-Perhaps a little code snippet.
-
-    use MCCal::Misc;
-
-    my $foo = MCCal::Misc->new();
-    ...
-
-=head1 EXPORT
-
-A list of functions that can be exported.  You can delete this section
-if you don't export anything, such as for a purely object-oriented module.
-
 =head1 SUBROUTINES/METHODS
 
 =cut
-
 
 
 # FIXME: not returning nodes
@@ -617,26 +600,6 @@ end
 =head1 AUTHOR
 
 Peter Ratzlaff, C<< <pratzlaff at cfa.harvarf.edu> >>
-
-
-=head1 SUPPORT
-
-You can find documentation for this module with the perldoc command.
-
-    perldoc MCCal::Misc
-
-
-=head1 ACKNOWLEDGEMENTS
-
-
-=head1 LICENSE AND COPYRIGHT
-
-This software is Copyright (c) 2025 by Peter Ratzlaff.
-
-This is free software, licensed under:
-
-  The Artistic License 2.0 (GPL Compatible)
-
 
 =cut
 
