@@ -22,8 +22,8 @@ And for HRC-S/LETG,
 <image src="images/hrcs_letg_simulated_arfs.png" />
 
 Bypassing the Chandra-specific routines, a more general use is possible
-the `--speconly` and `--specrows` options. An example `specfile` for
-XMM is included in the `data` directory, and a run for EPIC pn might be
+with the `--speconly` and `--specrows` options. An example `specfile` for
+XMM is included in the `data` directory, and a run for EPIC pn might look like
 ```
 perl bin/arfmod data/xmm.spec epic_pn.arf epic_pn_mod.arf \
      --speconly --specrows=mm,contam,opfm,epicpn
@@ -33,7 +33,7 @@ The results of 30 runs for this case:
 <image src="images/epic_pn_simulated_arfs.png" />
 
 The `specfile` format is a component name (telescope, detector, etc.)
-with a line for estimated calibration uncertainties in each desired energy
+followed by line for estimated calibration uncertainties in each desired energy
 band.
 ```
 COMP1
@@ -58,8 +58,7 @@ OBSERVATORY
 2.0 0.10 12.0 0.20 0.07
 ```
 
-This file is example is given in `data/simple.spec`, and ratios of
-modified to original responses are plotted below for five example runs
-with this `specfile`.
+This example is listed in `data/simple.spec`, and ratios of
+resulting modified to original responses for five runs are plotted below
 
 <image src="images/simple_simulated_arfs.png" />
