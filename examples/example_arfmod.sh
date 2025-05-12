@@ -2,9 +2,10 @@
 
 #
 # Using one of the ARFs in ./arfs, this script creates a number of ARF
-# simulations in ./out and then overplots them all.
+# simulations in ./out and then plots each of them with the original
+# superimposed.
 #
-# Examples runs are...
+# Example runs are...
 # 
 # ./example_arfmod.sh simple 5
 #
@@ -48,6 +49,8 @@ specs=(
     [simple]=simple
     [hrcs_letg]=chandra
     [acis_none]=chandra
+    [acis_meg]=chandra
+    [acis_heg]=chandra
     [epic_pn]=xmm
 )
 [ -z "${specs["$inst"]}]" ] && {
@@ -63,22 +66,22 @@ specfile="$specdir/${specs["$inst"]}.spec"
 
 opts=(
     [simple]='--speconly'
-    [hrcs_letg]=
-    [acis_none]=
-    [epic_pn]="--speconly -specrows=mm,contam,opfm,epicpn"
+    [epic_pn]="--speconly -specrows=mm,contam,obfm,epicpn"
 )
 
 popts=(
     [simple]='--ratio'
     [hrcs_letg]='--wav'
-    [acis_none]=
-    [epic_pn]=
+    [acis_meg]='--wav'
+    [acis_heg]='--wav'
 )
 
 titles=(
     [simple]='Simple Simulated ARFs'
     [hrcs_letg]='HRC-S/LETG Simulated ARFs'
     [acis_none]='ACIS/NONE Simulated ARFs'
+    [acis_heg]='ACIS/MEG Simulated ARFs'
+    [acis_heg]='ACIS/HEG Simulated ARFs'
     [epic_pn]='EPIC pn Simulated ARFs'
 )
 

@@ -250,7 +250,11 @@ if (!$opts{speconly}) {
   elsif ($hdr->{GRATING} =~ /LETG/) {
     @{$spec{GRATING}}{@speckeys} = @{$spec{LETG}}{@speckeys};
   }
-  else { croak $hdr->{GRATING}; }
+  elsif ($hdr->{GRATING} =~ /HETG/) {
+    my $arm = $hdr->{COMMENTS}{GRATING};
+    @{$spec{GRATING}}{@speckeys} = @{$spec{$arm}}{@speckeys};
+  }
+  else { croak "unrecognized grating: ".$hdr->{GRATING}; }
 
 }
 
@@ -293,6 +297,9 @@ sub arfmod {
     $log->infof("%s: %s", (caller(0))[3], \@_);
     my ($key, $corr) = @_;
     my $last;
+
+    defined $spec->{$key}{emin} or
+      die "no emin for key $key";
 
     for my $j (0..$#{$spec->{$key}{emin}}) {
       my $i = which(

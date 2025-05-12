@@ -1,5 +1,7 @@
-#! /usr/bin/perl -w
+#! /usr/bin/perl
+
 use strict;
+use warnings;
 
 =head1 NAME
 
@@ -19,7 +21,7 @@ Plot ARF simulations created by C<example_arfmod.sh>
 
 =item --dev=s
 
-PGPLOT output device.
+Comma-separated list of PGPLOT output devices.
 
 =item --title=s
 
