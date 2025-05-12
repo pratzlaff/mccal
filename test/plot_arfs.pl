@@ -3,19 +3,43 @@ use strict;
 
 =head1 NAME
 
-template - A template for Perl programs.
+plot_arfs.pl - Plot ARF simulations
 
 =head1 SYNOPSIS
 
-cp template newprog
+perl plot_arfs.pl arffile outdir [options]
 
 =head1 DESCRIPTION
 
-blah blah blah
+Plot ARF simulations created by C<example_arfmod.sh>
 
 =head1 OPTIONS
 
 =over 4
+
+=item --dev=s
+
+PGPLOT output device.
+
+=item --title=s
+
+Plot title.
+
+=item --wav
+
+Plot wavelength instead of energy.
+
+=item --[xlow,xhigh,ylow,yhigh]=f
+
+Specify one or more axis limit.
+
+=item --ylog
+
+Make Y axis logarithmic.
+
+=item --n=i
+
+Plot only the first C<n> simulated ARFS.
 
 =item --help
 
@@ -29,7 +53,7 @@ Show version and exit.
 
 =head1 AUTHOR
 
-Pete Ratzlaff E<lt>pratzlaff@cfa.harvard.eduE<gt> April 2014
+Pete Ratzlaff E<lt>pratzlaff@cfa.harvard.eduE<gt> May 2025
 
 =head1 SEE ALSO
 
@@ -76,7 +100,7 @@ if ($opts{debug}) {
 $opts{help} and _help();
 $opts{version} and _version();
 
-@ARGV == 2 or die "usage: $0 arf dir\n";
+@ARGV == 2 or die "Usage: $0 arf dir [options]\n\tTry --help for more information.\n";
 my ($arf, $dir) = @ARGV;
 
 my $barename = fileparse($arf, qr/\.[^.]*/);
@@ -104,8 +128,6 @@ for my $i (1..$n) {
   $specresp->slice(",$i") .= $specresp_;
 }
 
-$specresp = $specresp->log10 if $opts{ylog};
-
 my ($x, $y, $axis, $xlabel, $ylabel) = ($e->log10,
 					$specresp,
 					10,
@@ -114,7 +136,7 @@ my ($x, $y, $axis, $xlabel, $ylabel) = ($e->log10,
 				       );
 
 if ($opts{wav}) {
-  $x = 12.398/exp($e);
+  $x = 12.398/$e;
   $xlabel = '\gl';
   $axis = 0;
 }
