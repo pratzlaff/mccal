@@ -33,7 +33,7 @@ The results of 30 runs for this case:
 <image src="images/epic_pn_simulated_arfs.png" />
 
 The `specfile` format is a component name (telescope, detector, etc.)
-followed by line for estimated calibration uncertainties in each desired energy
+followed by a line for estimated calibration uncertainties in each desired energy
 band.
 ```
 COMP1
@@ -58,7 +58,7 @@ OBSERVATORY
 2.0 0.10 12.0 0.20 0.07
 ```
 
-This example is listed in `data/simple.spec`, and ratios of
-resulting modified to original responses for five runs are plotted below
+This example is listed in `data/simple.spec`, and the resulting ratios of
+modified to original responses for five runs are plotted below
 
 <image src="images/simple_simulated_arfs.png" />
