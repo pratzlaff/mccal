@@ -76,7 +76,7 @@ popts=(
 )
 
 titles=(
-    [simple]='Simulated Simulated ARFs'
+    [simple]='Simple Simulated ARFs'
     [hrcs_letg]='HRC-S/LETG Simulated ARFs'
     [acis_none]='ACIS/NONE Simulated ARFs'
     [epic_pn]='EPIC pn Simulated ARFs'
