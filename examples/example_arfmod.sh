@@ -1,9 +1,9 @@
 #! /bin/bash
 
 #
-# Using one of the ARFs in ./arfs, this script creates a number of ARF
-# simulations in ./out and then plots each of them with the original
-# superimposed.
+# Using one of the files in ./arfs, this script creates a number of ARF
+# modification in ./out and then plots each of them, finally overplotting
+# the original.
 #
 # Example runs are...
 # 
@@ -47,6 +47,7 @@ declare -A specs opts popts titles
 
 specs=(
     [simple]=simple
+    [nustar]=simple
     [hrcs_letg]=chandra
     [acis_none]=chandra
     [acis_meg]=chandra
@@ -71,6 +72,7 @@ opts=(
 
 popts=(
     [simple]='--ratio'
+    [nustar]='--xmax=80'
     [hrcs_letg]='--wav'
     [acis_meg]='--wav'
     [acis_heg]='--wav'
@@ -78,6 +80,7 @@ popts=(
 
 titles=(
     [simple]='Simple Simulated ARFs'
+    [nustar]='NuSTAR Simulated ARFs'
     [hrcs_letg]='HRC-S/LETG Simulated ARFs'
     [acis_none]='ACIS/NONE Simulated ARFs'
     [acis_heg]='ACIS/MEG Simulated ARFs'
@@ -95,4 +98,4 @@ done
 
 pngdev="$imagedir/${arffile_base}"_simulated_arfs.png/png
 
-"$perl" plot_arfs.pl "$arffile" "$outdir" --title "${titles["$inst"]}" ${popts["$inst"]} #--dev "$pngdev"
+python3 plot_arfs.py "$arffile" "$outdir" --title "${titles["$inst"]}" ${popts["$inst"]} #--dev "$pngdev"

@@ -199,16 +199,16 @@ my ($elo, $ehi) = read_bintbl_cols($infiles[0], qw/ energ_lo energ_hi /, { extna
 
 my $e = 0.5 * ($elo + $ehi);
 
-if ($opts{nustar}) {
+if ($hdr->{'TELESCOP'} =~ /nustar/i) {
   require MCCal::NuSTAR;
   $ratio = ones($e->nelem);
-  $ratio *= MCCal::NuSTAR::perturb_detabs($rng, $e) if $opts{nuabs};
-  $ratio *= MCCal::NuSTAR::perturb_vignet($rng, $e) if $opts{vignet};
+  $ratio *= MCCal::NuSTAR::perturb_detabs($e) if $opts{nuabs};
+  $ratio *= MCCal::NuSTAR::perturb_vignet($e) if $opts{vignet};
   goto OUTPUT;
 }
 
-if ($hdr->{'TELESCOP'} !~ 'CHANDRA' and not $opts{speconly}) {
-  croak "--speconly required for missons other than Chandra";
+if ($hdr->{'TELESCOP'} !~ /chandra/i and not $opts{speconly}) {
+  croak "--speconly required for missons other than Chandra and NuSTAR";
 }
 
 my $tstart = $opts{tstart} ? $opts{tstart}+0. : $hdr->{TSTART};
