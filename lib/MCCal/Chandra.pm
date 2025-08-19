@@ -16,8 +16,28 @@ use Carp;
 use Log::Any '$log';
 use PDL;
 
+use MCCal;
 use MCCal::FITS qw( read_bintbl_cols );
 use MCCal::Misc qw( discrete_draw _interpolate gauss_truncated );
+
+# default HRMA EA
+our $DATADIR = $MCCal::DATADIR;
+our $hrmafile = $DATADIR . '/hrma/hrmaD1996-12-20axeffaN0007.fits';
+
+# choose a random HRMA contamination layer model
+our $hrmarandomfile = $DATADIR . '/hrma/hrma_areas_pm6aa.dat';
+
+# HRMA orbit EAs
+our $aefforbitdir = $DATADIR . '/hrma/aeff-orbit-200809';
+
+# alternate QEs based on model fudging
+our $acisrandomrdb = $DATADIR . '/acis/bi_qe_curves.rdb';
+
+# the model of component optical depths
+our $contamtau = $DATADIR . '/acis/transmissions.txt';
+
+# time-dependent factors
+our $contamtdep = $DATADIR . '/acis/transmissions_tdep.txt';
 
 =head1 NAME
 
@@ -38,10 +58,12 @@ our $VERSION = '0.01';
 {
   my ($e, $ea);
   sub hrma_ea {
-    $log->debugf("%s: %s", (caller(0))[3], \@_);
+    my $subroutine = (caller(0))[3];
+    $log->debugf("%s: %s", $subroutine, \@_);
     if (!defined $e) {
       my $hrmafile = shift;
       my ($elo, $ehigh);
+      $log->infof("%s: reading HRMA EA file '%s'", $subroutine, $hrmafile);
       ($elo, $ehigh, $ea) = read_bintbl_cols($hrmafile, qw( energ_lo energ_hi effarea ), { extname => 'axaf_axeffa' }) or croak;
       $e = ($ehigh+$elo)/2;
       $_ = $_->flat for $e, $ea;
@@ -57,15 +79,13 @@ our $VERSION = '0.01';
 {
 my ($energy, $ea_default, $ea);
 sub hrma_model_random {
-  $log->debugf("%s: %s", (caller(0))[3], \@_);
+  my $subroutine = (caller(0))[3];
+  $log->debugf("%s: %s", $subroutine, \@_);
 
   return ($energy, $ea_default, $ea) if defined $ea;
 
-  my ($frac, $opts) = @_;
-  my %opts = %$opts;
+  my $frac = shift;
   $frac < 1 and $frac >=0 or croak $frac;
-
-  my ($hrmafile, $hrmarandomfile) = @opts{qw( hrmafile hrmarandomfile )};
 
   # FIXME: hardcoded number of energies
   my $ngrid = 1322;
@@ -78,6 +98,7 @@ sub hrma_model_random {
   # just double check
   $size == ($niter+1)*4*$ngrid or croak "$size, $niter, $ngrid";
 
+  $log->infof("%s: reading HRMA random file '%s'", $subroutine, $hrmarandomfile);
   open my $fh, '<', $hrmarandomfile or croak $!;
 
   # energies first
@@ -113,16 +134,15 @@ sub hrma_model_random {
 {
 my ($energy, $qe_default, $qe, $index);
 sub acis_model_random {
-  $log->debugf("%s: %s", (caller(0))[3], \@_);
+  my $subroutine = (caller(0))[3];
+  $log->debugf("%s: %s", $subroutine, \@_);
 
   return ($energy, $qe_default, $qe, $index) if defined $qe;
 
-  my ($frac, $opts) = @_;
-  my %opts = %$opts;
-  my $acisrandomrdb = $opts{acisrandomrdb};
-
+  my $frac = shift;
   $frac < 1 and $frac >=0 or croak $frac;
 
+  $log->infof("%s: reading ACIS random RDB '%s'", $subroutine, $acisrandomrdb);
   my @hdr = MyRDB::rdb_header($acisrandomrdb) or croak;
   my %params;
   for (@hdr) {
@@ -145,6 +165,7 @@ sub acis_model_random {
   $size == ($niter+1)*4*$ngrid or
     croak "size=$size, niter=$niter, ngrid=$ngrid, file integrity test failed";
 
+  $log->infof("%s: reading ACIS random binary '%s'", $subroutine, $binfile);
   open my $fh, '<', $binfile or croak "cannot open $binfile: $!";
 
   # energies first
@@ -231,15 +252,17 @@ sub contam_corr {
   # input time is seconds since 1998 (e.g., chandra event times)
   # returned uncertainties are fractional
   sub taus {
-    $log->debugf("%s: %s", (caller(0))[3], \@_);
+    my $subroutine = (caller(0))[3];
+    $log->debugf("%s: %s", $subroutine, \@_);
 
     my ($time, $opts) = @_;
     my %opts = %$opts;
-    my ($contamtdep, $contamtau, $tausigma, $factortausigma) =
-      @opts{qw( contamtdep contamtau tausigma factortausigma )};
+    my ($tausigma, $factortausigma) =
+      @opts{qw( tausigma factortausigma )};
 
     # read optical depth table
     if (!defined $e) {
+      $log->infof("%s: reading contam tau file '%s'", $subroutine, $contamtau);
       open my $fh, '<', $contamtau or croak "error opening $contamtau: $!";
       local $_;
       while (<$fh>) {
@@ -263,7 +286,7 @@ sub contam_corr {
       $fh->close;
     }
 
-    return $e, [ tau_tcorr($time, $contamtdep, @taus) ], [ @frac_err ];
+    return $e, [ tau_tcorr($time, @taus) ], [ @frac_err ];
   }
 }
 
@@ -271,12 +294,14 @@ sub contam_corr {
   my ($time, @tcorr);
   # input time is seconds since 1998 (e.g., chandra event times)
   sub tau_tcorr_factors {
-    $log->debugf("%s: %s", (caller(0))[3], \@_);
+    my $subroutine = (caller(0))[3];
+    $log->debugf("%s: %s", $subroutine, \@_);
 
-    my ($t, $contamtdep) = @_;
+    my $t = shift;
 
     # read in the time-dependent factors file if called for first time
     if (! defined $time) {
+      $log->infof("%s: reading contam tdep file '%s'", $subroutine, $contamtdep);
       ($time, @tcorr) = rcols $contamtdep;
     }
 
@@ -289,8 +314,8 @@ sub contam_corr {
 sub tau_tcorr {
   $log->debugf("%s: %s", (caller(0))[3], \@_);
 
-  my ($time, $contamtdep, @tau) = @_;
-  my @tcorr = tau_tcorr_factors($time, $contamtdep);
+  my ($time, @tau) = @_;
+  my @tcorr = tau_tcorr_factors($time);
   @tau == @tcorr or croak scalar(@tau) . ' versus ' . scalar(@tcorr);
   return map { $tau[$_] * $tcorr[$_] } 0..$#tau;
 }
@@ -306,11 +331,10 @@ relative to the "f" model.
 
 
 sub aeff_orbit_corr {
-  $log->debugf("%s: %s", (caller(0))[3], \@_);
+  my $subroutine = (caller(0))[3];
+  $log->debugf("%s: %s", $subroutine, \@_);
 
-  my ($e, $opts) = @_;
-  my %opts = %{$opts};
-  my $aefforbitdir = $opts{aefforbitdir};
+  my $e = shift;
 
   my %prob = (
 	      'aeff-orbit-200809-01a.fits' =>  1,
@@ -346,8 +370,6 @@ sub aeff_orbit_corr {
   my $file = $f[$findex];
   my $ffile = 'aeff-orbit-200809-01f.fits';
 
-#  carp "aeff_orbit_corr() chose $file";
-
   return(ones($e), $findex) if $file eq $ffile;
 
   $_ = $aefforbitdir . '/' . $_ for $file, $ffile;
@@ -355,9 +377,11 @@ sub aeff_orbit_corr {
     -r $_ or croak "maybe --aefforbitdir=s should be used, cannot read $_";
   }
 
+  $log->infof("%s: reading aeff orbit file '%s'", $subroutine, $file);
   my ($elo, $ehi, $ea) = read_bintbl_cols($file, qw( energ_lo energ_hi effarea ), { extname => 'axaf_axeffa'}) or croak "error reading $file";
   $ea = _interpolate($e, (0.5*($elo+$ehi))->slice(',(0)'), $ea->slice(',(0)'));
 
+  $log->infof("%s: reading aeff orbit file '%s'", $subroutine, $ffile);
   my ($elof, $ehif, $eaf) = read_bintbl_cols($ffile, qw( energ_lo energ_hi effarea ), { extname => 'axaf_axeffa'}) or croak "error reading $ffile";
   $eaf = _interpolate($e, (0.5*($elof+$ehif))->slice(',(0)'), $eaf->slice(',(0)'));
 

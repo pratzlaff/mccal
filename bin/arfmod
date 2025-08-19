@@ -4,7 +4,9 @@ use warnings;
 
 use FindBin;
 use lib $FindBin::Bin . '/../lib';
-my $datadir = $FindBin::Bin . '/../data';
+use MCCal;
+
+my $datadir = $MCCal::DATADIR;
 
 =head1 NAME
 
@@ -84,6 +86,8 @@ use MCCal::Misc qw( discrete_draw
 
 $PDL::IO::FlexRaw::writeflexhdr = 1;
 
+my $subroutine = (caller(0))[3];
+
 # HISTORY entry for output file
 my @argv_copy = @ARGV;
 s/'/\\'/g for @argv_copy;
@@ -94,17 +98,12 @@ my %default_opts = (
 
 		    # choose a random HRMA contamination layer model
 		    hrmacontamrand => 1,
-		    hrmarandomfile => $datadir . '/hrma/hrma_areas_pm6aa.dat',
 
 		    # perturb HRMA entry in spec file
 		    hrmarand => 1,
 
-		    # default HRMA EA
-		    hrmafile => $datadir . '/hrma/hrmaD1996-12-20axeffaN0007.fits',
-
 		    # yet another HRMA correction
 		    aefforbitcorr => 1,
-		    aefforbitdir => $datadir . '/hrma/aeff-orbit-200809',
 
 		    # perturb GRATING entry in spec file
 		    gratingrand => 1,
@@ -121,8 +120,6 @@ my %default_opts = (
 
 		    # the default qe
 		    acisqe => $datadir . '/acis/s3_d46.qdp.bin',
-		    # alternates based on model fudging
-		    acisrandomrdb => $datadir . '/acis/bi_qe_curves.rdb',
 
 		    # perturb detector entry (eg ACISS3) in spec file
 		    detrand => 1,
@@ -134,12 +131,6 @@ my %default_opts = (
 
 		    # perturb the obf contamination layer model
 		    contammodel => 1,
-
-		    # the model of component optical depths
-		    contamtau => $datadir . '/acis/transmissions.txt',
-
-		    # time-dependent factors
-		    contamtdep => $datadir . '/acis/transmissions_tdep.txt',
 
 		    vertexoffset => 'uniform',
 		    edgeveto => 1,
@@ -164,7 +155,7 @@ GetOptions(\%opts,
 	   'contamrand!', 'hrmarand!', 'acisqerand!', 'detrand!', 'gratingrand!',
 	   'vertexoffset=s', 'perturb=s', 'spoints=i', 'filterrand!',
 	   'clip!', 'contamtdep=s', 'contamtau=s', 'contammodel!', 'tstart=f',
-	   'plog!', 'aefforbitcorr!', 'aefforbitdir=s',
+	   'plog!', 'aefforbitcorr!',
 	   'flexfile=s', 'seed=i',
 	   'nustar!', 'nuabs!', 'vignet!',
 
@@ -231,9 +222,11 @@ my $specrows;
 
 if (!$opts{speconly}) {
   if ($hdr->{INSTRUME} =~ /ACIS/ or $hdr->{DETNAM} =~ /ACIS-\d*7/) {
+    $log->infof("%s: reading ACIS-S OBF file '%s'", $subroutine, $opts{acissobf});
     @{$spec{FILTER}}{qw(e trans)} = read_twocol_bin($opts{acissobf});
     @{$spec{FILTER}}{@speckeys} = @{$spec{OBFS}}{@speckeys};
 
+    $log->infof("%s: reading ACIS QE file '%s'", $subroutine, $opts{acisqe});
     @{$spec{DETECTOR}}{qw(e qe)} = read_twocol_bin($opts{acisqe});
     @{$spec{DETECTOR}}{@speckeys} = @{$spec{ACISS3}}{@speckeys};
   }
@@ -338,7 +331,7 @@ sub arfmod {
 
     # HRMA EA contamination varational model correction
     if ($opts{hrmacontamrand}) {
-      my ($hrma_e, $hrma_default_ea, $hrma_ea, $index) = hrma_model_random(rand(), \%opts);
+      my ($hrma_e, $hrma_default_ea, $hrma_ea, $index) = hrma_model_random(rand());
       $_ = _interpolate($e, $hrma_e, $_) for $hrma_default_ea, $hrma_ea;
       carp "negative" if which($hrma_default_ea<0)->nelem;
       $other_corr *= ($hrma_ea / $hrma_default_ea)->badmask(0);
@@ -346,7 +339,7 @@ sub arfmod {
     }
 
     if ($opts{aefforbitcorr}) {
-      my ($perb, $index) = aeff_orbit_corr($e, \%opts);
+      my ($perb, $index) = aeff_orbit_corr($e);
       $other_corr *= $perb;
       $aefforbitcorr_index = $index;
     }
@@ -355,7 +348,7 @@ sub arfmod {
     if (($hdr->{INSTRUME} =~ /ACIS/ or $hdr->{DETNAM} =~ /ACIS/)
       and $opts{acisqerand}
        ) {
-      my ($acis_e, $acis_default_qe, $acis_qe, $index) = acis_model_random(rand(), \%opts);
+      my ($acis_e, $acis_default_qe, $acis_qe, $index) = acis_model_random(rand());
       $_ = _interpolate($e, $acis_e, $_) for $acis_default_qe, $acis_qe;
       $other_corr *= ($acis_qe / $acis_default_qe)->badmask(0);
       $acismodelrandom_index = $index;
