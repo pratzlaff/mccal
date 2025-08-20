@@ -32,7 +32,7 @@ rm -rf "$outdir"
 mkdir -p "$outdir"
 
 perl=perl
-specdir=../data
+specdir=../data/specfiles
 arfdir=./arfs
 imagedir=../images
 mkdir -p $imagedir
@@ -47,7 +47,9 @@ declare -A specs opts popts titles
 
 specs=(
     [simple]=simple
-    [nustar]=simple
+    [nustar]=none
+    [athena_wfi]=athena/wfi_mccal
+    [athena_xifu]=athena/xifu_mccal
     [hrcs_letg]=chandra
     [acis_none]=chandra
     [acis_meg]=chandra
@@ -67,6 +69,8 @@ specfile="$specdir/${specs["$inst"]}.spec"
 
 opts=(
     [simple]='--speconly'
+    [athena_wfi]='--speconly'
+    [athena_xifu]='--speconly'
     [epic_pn]="--speconly -specrows=mm,contam,obfm,epicpn"
 )
 
@@ -81,6 +85,9 @@ popts=(
 titles=(
     [simple]='Simple Simulated ARFs'
     [nustar]='NuSTAR Simulated ARFs'
+    [athena_wfi]='Athena Simulated ARFs'
+    [athena_wfi_contam]='Athena Simulated ARFs (contamination included)'
+    [athena_xifu]='Athena X-IFU Simulated ARFs'
     [hrcs_letg]='HRC-S/LETG Simulated ARFs'
     [acis_none]='ACIS/NONE Simulated ARFs'
     [acis_heg]='ACIS/MEG Simulated ARFs'
